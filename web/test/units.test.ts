@@ -8,6 +8,8 @@ import { buildRegex, findRanges } from '../src/views/find';
 import { TabManager } from '../src/tabs';
 import { DocStore, countChars, countLines, countWords, encodingLabel, type HostDoc } from '../src/docs';
 import { PreviewView } from '../src/views/preview';
+import type { SourceView } from '../src/views/source';
+import { ScrollSync } from '../src/views/sync';
 
 void dom;
 
@@ -154,4 +156,53 @@ test('미리보기 찾기: 일치 표시·순환·해제 (FR-FIND-03)', () => {
   v.clearFind();
   assert.equal(v.article.querySelectorAll('mark').length, 0);
   assert.equal(v.article.textContent, '사과 바나나 사과 포도사과');
+});
+
+/** 분할 보기 동기화 시험용 가짜 한쪽 보기. 줄 번호만 다룬다. */
+function fakePane(line: number) {
+  const el = dom.window.document.createElement('div') as unknown as HTMLElement;
+  return { el, line, moves: 0, settling: false, topLine() { return this.line; }, scrollToLine(l: number) { this.moves++; this.line = l; } };
+}
+
+const frames = (n: number) => new Promise<void>((r) => setTimeout(r, n * 20));
+
+test('분할 보기: 따라간 뒤 배치가 바뀌어 어긋나면 다시 맞춘다 (FR-VIEW-05)', async () => {
+  const preview = fakePane(0);
+  const source = fakePane(0);
+  // 원문의 줄 바꿈 줄 높이가 추정치라 처음 이동은 3.6줄 밀려 닿는다.
+  source.scrollToLine = function (l: number) {
+    this.moves++;
+    this.line = this.moves === 1 ? l + 3.6 : l;
+  };
+  const lines: number[] = [];
+  const sync = new ScrollSync(preview as unknown as PreviewView, () => true, () => true, (l) => lines.push(l));
+  sync.attachSource({ view: { scrollDOM: source.el }, topLine: () => source.topLine(), scrollToLine: (l: number) => source.scrollToLine(l) } as unknown as SourceView);
+
+  preview.line = 41.2;
+  preview.el.dispatchEvent(new dom.window.Event('scroll'));
+  assert.ok(Math.abs(source.line - 44.8) < 1e-9, '첫 이동은 어긋난다');
+  // 미리보기도 새로 보이는 블록이 실제 크기로 그려지며 맨 위 줄이 바뀐다 (스크롤 이벤트 없음).
+  preview.line = 40.5;
+  await frames(15);
+  assert.ok(Math.abs(source.line - 40.5) < 0.01, `원문 ${source.line}`);
+  assert.equal(lines.at(-1), 40.5, '탭 줄도 최종 위치로');
+  // 다시 맞추는 동안 생긴 원문 스크롤 이벤트는 되받지 않는다.
+  source.el.dispatchEvent(new dom.window.Event('scroll'));
+  assert.equal(preview.line, 40.5);
+});
+
+test('분할 보기: 따라가던 쪽을 사용자가 움직이면 다시 맞추기를 멈춘다 (FR-VIEW-05)', async () => {
+  const preview = fakePane(0);
+  const source = fakePane(0);
+  const sync = new ScrollSync(preview as unknown as PreviewView, () => true, () => true, () => {});
+  sync.attachSource({ view: { scrollDOM: source.el }, topLine: () => source.topLine(), scrollToLine: (l: number) => source.scrollToLine(l) } as unknown as SourceView);
+
+  preview.line = 30;
+  preview.el.dispatchEvent(new dom.window.Event('scroll'));
+  source.el.dispatchEvent(new dom.window.Event('wheel'));
+  source.line = 55;
+  source.el.dispatchEvent(new dom.window.Event('scroll'));
+  await frames(15);
+  assert.equal(source.line, 55, '사용자가 굴린 위치를 되돌리지 않는다');
+  assert.equal(preview.line, 55, '이제 원문이 앞선 쪽');
 });

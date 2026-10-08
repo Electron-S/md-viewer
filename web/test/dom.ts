@@ -7,6 +7,8 @@ const w = dom.window as any;
 for (const key of ['window', 'document', 'Node', 'NodeFilter', 'Element', 'HTMLElement', 'DocumentFragment', 'Text', 'CSS']) {
   if (!(key in g) || key === 'window' || key === 'document') g[key] = key === 'window' ? w : w[key];
 }
+g.requestAnimationFrame = w.requestAnimationFrame.bind(w);
+g.cancelAnimationFrame = w.cancelAnimationFrame.bind(w);
 g.ResizeObserver = class {
   observe() {}
   disconnect() {}
