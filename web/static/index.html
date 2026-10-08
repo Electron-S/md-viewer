@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="ko" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https://file.mdview data: https: http:; font-src 'self' data:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MD Viewer</title>
+  <link rel="stylesheet" href="app.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <div id="app">
+    <div id="menubar"></div>
+    <div id="tabbar"></div>
+    <div id="body">
+      <aside id="side">
+        <div class="side-tabs" role="tablist">
+          <button class="side-tab active" data-tab="toc" role="tab" data-s="tocTab"></button>
+          <button class="side-tab" data-tab="workspace" role="tab" data-s="workspaceTab"></button>
+        </div>
+        <div id="side-content"></div>
+      </aside>
+      <div id="resizer" role="separator" aria-orientation="vertical" data-s-title="resizer"></div>
+      <main id="main">
+        <div id="find-slot"></div>
+        <div id="views" data-mode="preview" hidden>
+          <div class="pane source"></div>
+          <div class="pane preview"></div>
+        </div>
+        <div id="empty">
+          <div class="empty-box">
+            <h1>MD Viewer</h1>
+            <p data-s="emptyHint"></p>
+            <p>
+              <button id="empty-open" class="primary" data-s="emptyOpen"></button>
+              <button id="empty-folder" data-s="emptyFolder"></button>
+            </p>
+            <h2 id="empty-recent-title" data-s="emptyRecent" hidden></h2>
+            <ul id="empty-recent"></ul>
+          </div>
+        </div>
+      </main>
+    </div>
+    <div id="statusbar"></div>
+  </div>
+</body>
+</html>
