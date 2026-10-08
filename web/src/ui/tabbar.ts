@@ -14,6 +14,7 @@ export class TabBar {
     private el: HTMLElement,
     private tabs: TabManager,
     private getDoc: (docId: string) => DocModel | undefined,
+    private displayPath: (path: string) => string = (p) => p,
   ) {
     el.setAttribute('role', 'tablist');
     el.addEventListener('wheel', (e) => {
@@ -60,7 +61,7 @@ export class TabBar {
       t.setAttribute('role', 'tab');
       t.setAttribute('aria-selected', String(tab.id === active));
       t.dataset.id = String(tab.id);
-      t.title = tab.path + (deleted ? '\n' + S.tab.deletedTooltip : '');
+      t.title = this.displayPath(tab.path) + (deleted ? '\n' + S.tab.deletedTooltip : '');
       t.draggable = true;
       const name = document.createElement('span');
       name.className = 'tab-name';

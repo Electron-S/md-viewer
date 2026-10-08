@@ -26,9 +26,9 @@ test('GFM: 표, 작업 목록, 취소선, 자동 링크 (FR-REN-01)', () => {
   );
   assert.match(html, /<table data-line="0">/);
   assert.match(html, /<th>a<\/th>/);
-  assert.match(html, /<td style="text-align:center">2<\/td>/);
+  assert.match(html, /<td align="center">2<\/td>/);
   assert.match(html, /<input class="task-list-item-checkbox" checked="" disabled="" type="checkbox">/);
-  assert.match(html, /<s>지움<\/s>/);
+  assert.match(html, /<del>지움<\/del>/);
   assert.match(html, /<a href="http:\/\/www\.example\.com">www\.example\.com<\/a>/);
   assert.match(html, /<a href="https:\/\/example\.org">/);
   assert.doesNotMatch(renderMarkdown(md, 'README.md 파일').html, /<a /, '파일 이름은 링크가 아니다');
@@ -140,4 +140,23 @@ test('코드 강조가 실패한 블록도 원문과 오류 안내로 바꾼다 
   } finally {
     hljs.highlight = original;
   }
+});
+
+test('GFM 스펙 확장 예제 전체 일치 (FR-REN-01)', () => {
+  // cmark-gfm test/spec.txt의 표·작업 목록·취소선·자동 링크·태그 필터 예제.
+  // 앱이 일부러 덧붙이는 것(제목 id, 작업 목록 class)은 비교에서 뺀다(릴리스 노트에 적음).
+  const spec: { markdown: string; html: string; extension: string; line: number }[] = JSON.parse(
+    readFileSync('tests/samples/gfm-extensions.json', 'utf8'),
+  );
+  const md = createMarkdown({ sourceMap: false, highlight: false });
+  const norm = (html: string) =>
+    html
+      .replace(/ id="[^"]*"/g, '')
+      .replace(/ class="(task-list-item|contains-task-list|task-list-item-checkbox)"/g, '')
+      .split(/(<pre[\s\S]*?<\/pre>)/)
+      .map((part, i) => (i % 2 ? part : part.replace(/>\s+</g, '><').trim()))
+      .join('');
+  const failed = spec.filter((ex) => norm(renderMarkdown(md, ex.markdown).html) !== norm(ex.html)).map((ex) => `${ex.extension}:${ex.line}`);
+  assert.equal(spec.length, 24);
+  assert.deepEqual(failed, []);
 });

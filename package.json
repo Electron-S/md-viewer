@@ -3,12 +3,11 @@
   "version": "1.0.0",
   "private": true,
   "license": "MIT",
-  "description": "Notepad++ 수준의 Markdown 뷰어 (WebView2 + C# 호스트)",
+  "description": "설치 없이 브라우저에서 여는 Markdown 뷰어와 로컬 실행기(Claude Code 스킬)",
   "scripts": {
     "typecheck": "tsc --noEmit -p .",
-    "bundle": "node tools/bundle.mjs",
-    "test": "node --test web/test/",
-    "build:web": "npm run typecheck && npm run bundle"
+    "build": "node tools/build.mjs",
+    "test": "node tools/test.mjs"
   },
   "dependencies": {
     "@codemirror/commands": "^6.11.1",

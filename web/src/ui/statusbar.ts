@@ -10,6 +10,8 @@ export class StatusBar {
   private left: HTMLElement;
   private right: HTMLElement;
   private counts = new WeakMap<DocModel, { lines: number; words: number; chars: number }>();
+  private last: [DocModel | null, ViewMode | null, number] = [null, null, 100];
+  private offline = false;
 
   constructor(el: HTMLElement) {
     this.left = document.createElement('div');
@@ -19,7 +21,14 @@ export class StatusBar {
     el.append(this.left, this.right);
   }
 
+  /** 실행기와 연결이 끊겼는지 표시한다 (SDD 7.3). */
+  setOffline(offline: boolean) {
+    this.offline = offline;
+    this.render(...this.last);
+  }
+
   render(doc: DocModel | null, mode: ViewMode | null, zoom: number) {
+    this.last = [doc, mode, zoom];
     this.left.replaceChildren();
     this.right.replaceChildren();
     if (doc) {
@@ -43,6 +52,7 @@ export class StatusBar {
       if (doc.decodeWarning) this.item(this.left, S.status.decodeWarning, 'warning').classList.add('warn');
       if (doc.state === 'deleted') this.item(this.left, S.status.deleted, 'deleted').classList.add('warn');
     }
+    if (this.offline) this.item(this.right, S.status.offline, 'offline').classList.add('warn');
     if (mode) this.item(this.right, MODE_LABEL[mode], 'mode');
     this.item(this.right, `${zoom}%`, 'zoom');
   }

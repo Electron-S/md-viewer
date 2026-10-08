@@ -30,6 +30,8 @@ export interface Settings {
   wordWrap: boolean;
   allowRemoteImages: boolean;
   largeFileMB: number;
+  /** 독립 모드에서 연 파일·폴더 핸들을 브라우저 저장소에 기억할지 (SDD 8.4) */
+  rememberHandles: boolean;
   /** v1.1 단축키 사용자 지정용 예약 */
   keybindings: Record<string, string>;
 }
@@ -57,6 +59,7 @@ export function defaultSettings(): Settings {
     wordWrap: true,
     allowRemoteImages: true,
     largeFileMB: 5,
+    rememberHandles: true,
     keybindings: {},
   };
 }
@@ -117,6 +120,7 @@ export function parseSettings(json: string | null | undefined): Settings {
   d.zoom = Math.round(clampNum(v.zoom, ZOOM_MIN, ZOOM_MAX, 100));
   if (typeof v.wordWrap === 'boolean') d.wordWrap = v.wordWrap;
   if (typeof v.allowRemoteImages === 'boolean') d.allowRemoteImages = v.allowRemoteImages;
+  if (typeof v.rememberHandles === 'boolean') d.rememberHandles = v.rememberHandles;
   d.largeFileMB = clampNum(v.largeFileMB, 1, 100, 5);
   if (v.keybindings && typeof v.keybindings === 'object') {
     for (const [k, val] of Object.entries(v.keybindings)) if (isStr(val)) d.keybindings[k] = val;

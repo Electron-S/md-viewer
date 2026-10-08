@@ -8,6 +8,8 @@ export interface Command {
   run: () => unknown;
   enabled?: () => boolean;
   checked?: () => boolean;
+  /** v1.1 이후 기능. 키만 잡아 브라우저 기본 동작을 막고, 메뉴·단축키 목록에는 보이지 않는다. */
+  reserved?: boolean;
 }
 
 const CODE_NAMES: Record<string, string> = {

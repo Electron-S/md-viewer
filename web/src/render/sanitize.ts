@@ -1,10 +1,16 @@
 import createDOMPurify from 'dompurify';
-import { classifyUrl, fileResourceUrl, isInternalUrl, isMarkdownPath, isTextPath, resolveLocalUrl } from './paths';
+import { classifyUrl, isInternalUrl, isMarkdownPath, isTextPath, resolveLocalUrl } from './paths';
 
 export interface SanitizeContext {
   /** 문서 폴더. 상대 경로 이미지·링크의 기준 */
   docDir: string;
+  /** `/x` 링크·이미지의 기준(실행기 루트, 핸들 폴더). 없으면 문서 위치의 루트 */
+  docRoot?: string | null;
   allowRemoteImages: boolean;
+  /** 로컬 이미지 주소를 브리지가 만든다. null이면 data-mdv-src만 남기고 그린 뒤에 채운다 (SDD 8.1). */
+  imageUrl: (path: string) => string | null;
+  /** 이 페이지의 origin. 문서가 직접 쓴 같은 origin 주소는 지운다 (SDD 8.4). */
+  selfOrigin?: string;
 }
 
 // NFR-SEC-01: 실행되거나 앱 UI를 덮을 수 있는 태그·속성은 모두 지운다.
@@ -20,8 +26,10 @@ const FORBID_ATTR = ['style', 'srcset', 'formaction', 'action', 'background', 'p
 /**
  * DOMPurify로 정제한 뒤 링크·이미지 주소를 앱 규칙으로 바꾼다 (SDD 8.1 5~6단계).
  * 결과 링크 속성:
- *  - data-mdv-ext: http·https·mailto (기본 브라우저로 연다)
+ *  - data-mdv-ext: http·https·mailto (브라우저 새 탭으로 연다)
  *  - data-mdv-path / data-mdv-frag: 로컬 파일과 조각
+ * 결과 이미지 속성:
+ *  - data-mdv-src: 아직 주소를 받지 못한 로컬 이미지의 위치
  */
 export function createSanitizer(win: Window) {
   const purify = createDOMPurify(win as unknown as Parameters<typeof createDOMPurify>[0]);
@@ -35,10 +43,6 @@ export function createSanitizer(win: Window) {
       a.removeAttribute('target');
       const href = a.getAttribute('href');
       if (href == null) continue;
-      if (isInternalUrl(href)) {
-        a.removeAttribute('href');
-        continue;
-      }
       const kind = classifyUrl(href);
       if (kind === 'fragment') {
         a.setAttribute('data-mdv-frag', safeDecode(href.slice(1)));
@@ -46,7 +50,7 @@ export function createSanitizer(win: Window) {
         a.setAttribute('data-mdv-ext', href.trim());
         if (!a.title) a.title = href.trim();
       } else if (kind === 'local') {
-        const loc = resolveLocalUrl(href, ctx.docDir);
+        const loc = resolveLocalUrl(href, ctx.docDir, ctx.docRoot);
         if (!loc) {
           a.removeAttribute('href');
           continue;
@@ -65,7 +69,7 @@ export function createSanitizer(win: Window) {
       img.setAttribute('loading', 'lazy');
       const src = img.getAttribute('src');
       if (src == null) continue;
-      if (isInternalUrl(src)) {
+      if (isInternalUrl(src, ctx.selfOrigin)) {
         img.removeAttribute('src');
         continue;
       }
@@ -80,9 +84,14 @@ export function createSanitizer(win: Window) {
         continue;
       }
       if (kind === 'local') {
-        const loc = resolveLocalUrl(src, ctx.docDir);
+        const loc = resolveLocalUrl(src, ctx.docDir, ctx.docRoot);
         if (loc) {
-          img.setAttribute('src', fileResourceUrl(loc.path));
+          const url = ctx.imageUrl(loc.path);
+          if (url) img.setAttribute('src', url);
+          else {
+            img.removeAttribute('src');
+            img.setAttribute('data-mdv-src', loc.path);
+          }
           continue;
         }
       }

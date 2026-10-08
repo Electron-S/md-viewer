@@ -153,9 +153,13 @@ button:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--accent
 .source-wrap .cm-editor { height: 100%; }
 .source-wrap .cm-editor.cm-focused { outline: none; }
 .preview-scroll { flex: 1; overflow: auto; min-height: 0; outline: none; }
+.preview-notice { position: sticky; top: 0; z-index: 2; display: flex; gap: 12px; align-items: center; padding: 8px 16px; background: var(--bg-chrome); border-bottom: 1px solid var(--line); font-size: 13px; }
+.preview-notice[hidden] { display: none; }
+.preview-notice button { font: inherit; padding: 3px 10px; border-radius: 4px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); cursor: pointer; }
 
 #empty { flex: 1; display: flex; align-items: center; justify-content: center; overflow: auto; }
 .empty-box { max-width: 560px; padding: 24px; color: var(--fg-muted); }
+.retired { max-width: 560px; padding: 24px; color: var(--fg-muted); }
 .empty-box h1 { color: var(--fg); font-weight: 600; font-size: 22px; margin: 0 0 8px; }
 .empty-box h2 { font-size: 13px; margin: 24px 0 6px; color: var(--fg); }
 .empty-box ul { list-style: none; padding: 0; margin: 0; }

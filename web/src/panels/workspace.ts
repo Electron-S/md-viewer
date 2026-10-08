@@ -1,5 +1,5 @@
 import type { Bridge } from '../bridge';
-import { basename } from '../render/paths';
+import { basename, docKey, joinPath } from '../render/paths';
 import { S } from '../strings';
 
 interface DirEntry {
@@ -42,8 +42,9 @@ export class WorkspacePanel {
     head.className = 'ws-head';
     const name = document.createElement('span');
     name.className = 'ws-name';
-    name.textContent = basename(path) || path;
-    name.title = path;
+    const shown = this.bridge.displayPath(path);
+    name.textContent = basename(shown) || shown;
+    name.title = shown;
     const refresh = button('↻', S.workspace.refresh, () => this.setRoot(this.root));
     const close = button('×', S.workspace.close, () => this.onClose());
     head.append(name, refresh, close);
@@ -54,9 +55,9 @@ export class WorkspacePanel {
   }
 
   setActive(path: string) {
-    this.activeKey = path.toLowerCase();
+    this.activeKey = path ? docKey(path) : '';
     for (const el of Array.from(this.body.querySelectorAll<HTMLElement>('.ws-file'))) {
-      el.classList.toggle('active', (el.dataset.path ?? '').toLowerCase() === this.activeKey);
+      el.classList.toggle('active', docKey(el.dataset.path ?? '') === this.activeKey);
     }
   }
 
@@ -85,7 +86,7 @@ export class WorkspacePanel {
     ul.replaceChildren();
     if (!entries.length) ul.append(note(S.workspace.noDocs));
     for (const e of entries) {
-      const path = dir.replace(/\\$/, '') + '\\' + e.name;
+      const path = joinPath(dir, e.name);
       const li = document.createElement('li');
       li.setAttribute('role', 'none');
       const item = document.createElement('button');
@@ -93,7 +94,7 @@ export class WorkspacePanel {
       item.className = e.isDir ? 'ws-item ws-dir' : 'ws-item ws-file';
       item.style.paddingLeft = `${8 + depth * 14}px`;
       item.dataset.path = path;
-      item.title = path;
+      item.title = this.bridge.displayPath(path);
       item.textContent = (e.isDir ? '▸ ' : '') + e.name;
       li.append(item);
       ul.append(li);
@@ -114,7 +115,7 @@ export class WorkspacePanel {
           }
         });
       } else {
-        if (path.toLowerCase() === this.activeKey) item.classList.add('active');
+        if (docKey(path) === this.activeKey) item.classList.add('active');
         item.addEventListener('click', () => this.onOpen(path));
       }
     }

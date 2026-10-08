@@ -22,6 +22,7 @@ export class PreviewView {
   readonly el: HTMLElement;
   readonly root: ShadowRoot;
   readonly article: HTMLElement;
+  private noticeEl: HTMLElement;
   onLink: (action: LinkAction) => void = () => {};
   private anchors: LineAnchor[] | null = null;
   private marks: HTMLElement[] = [];
@@ -34,9 +35,12 @@ export class PreviewView {
     this.el = document.createElement('div');
     this.el.className = 'preview-scroll';
     this.el.tabIndex = 0;
+    this.noticeEl = document.createElement('div');
+    this.noticeEl.className = 'preview-notice';
+    this.noticeEl.hidden = true;
     const host = document.createElement('div');
     host.className = 'preview-host';
-    this.el.append(host);
+    this.el.append(this.noticeEl, host);
     this.root = host.attachShadow({ mode: 'open' });
     this.article = document.createElement('article');
     this.article.className = 'markdown-body';
@@ -121,6 +125,22 @@ export class PreviewView {
       box.append(b);
     }
     this.setContent(box);
+  }
+
+  /** 문서 위에 띠 하나를 둔다(예: 폴더를 열어야 이미지가 보인다는 안내). null이면 숨긴다. */
+  setNotice(notice: { text: string; action?: { label: string; run: () => void } } | null) {
+    this.noticeEl.replaceChildren();
+    this.noticeEl.hidden = !notice;
+    if (!notice) return;
+    const p = document.createElement('span');
+    p.textContent = notice.text;
+    this.noticeEl.append(p);
+    if (notice.action) {
+      const b = document.createElement('button');
+      b.textContent = notice.action.label;
+      b.addEventListener('click', notice.action.run);
+      this.noticeEl.append(b);
+    }
   }
 
   setZoom(percent: number) {

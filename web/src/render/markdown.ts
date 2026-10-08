@@ -37,16 +37,23 @@ function highlight(code: string, info: string): string {
 
 const WWW_TAIL = /^[\p{L}\p{N}_-]+(?:\.[\p{L}\p{N}_-]+)+(?:[/?#][^\s<]*)?/u;
 
-/** GFM 규칙: 끝의 문장부호와 짝이 안 맞는 닫는 괄호는 링크에서 뺀다. */
+/** GFM 규칙: 끝의 문장부호, 짝이 안 맞는 닫는 괄호, 엔티티 모양(`&hl;`) 꼬리는 링크에서 뺀다. */
 function trimAutolink(s: string): string {
   let out = s;
   for (;;) {
     const last = out[out.length - 1];
     if (/[?!.,:*_~'"]/.test(last)) out = out.slice(0, -1);
     else if (last === ')' && (out.match(/\)/g)?.length ?? 0) > (out.match(/\(/g)?.length ?? 0)) out = out.slice(0, -1);
+    else if (last === ';' && /&[a-z0-9]+;$/i.test(out)) out = out.replace(/&[a-z0-9]+;$/i, '');
     else return out;
   }
 }
+
+/** GFM 확장 이메일 자동 링크: 도메인은 영숫자·`-`·`_`를 마침표로 나눈 것이고 마지막 글자가 `-`·`_`가 아니다. */
+const GFM_EMAIL = /^mailto:[A-Za-z0-9.+_-]+@[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+$/;
+
+/** GFM tagfilter: 이 태그들은 지우지 않고 `<`를 `&lt;`로 바꿔 글자로 보여준다. */
+const TAGFILTER = /<(?=(title|textarea|style|xmp|iframe|noembed|noframes|script|plaintext)[\s/>])/gi;
 
 export function createMarkdown(opts: MarkdownOptions = {}): MarkdownIt {
   const { sourceMap = true, extensions = true } = opts;
@@ -71,6 +78,24 @@ export function createMarkdown(opts: MarkdownOptions = {}): MarkdownIt {
       },
     });
     md.use(footnote).use(taskLists, { enabled: false, label: false });
+    md.core.ruler.push('mdv_gfm', (state) => {
+      for (const t of state.tokens) {
+        if (t.type === 'html_block') t.content = t.content.replace(TAGFILTER, '&lt;');
+        for (let i = 0; i < (t.children?.length ?? 0); i++) {
+          const c = t.children![i];
+          if (c.type === 'html_inline') c.content = c.content.replace(TAGFILTER, '&lt;');
+          // GFM은 취소선을 <del>로 낸다.
+          if (c.type === 's_open' || c.type === 's_close') c.tag = 'del';
+          // 도메인 규칙에 맞지 않는 이메일 자동 링크는 글자로 되돌린다.
+          const href = String(c.attrGet('href') ?? '');
+          if (c.type === 'link_open' && c.markup === 'linkify' && /^mailto:/i.test(href) && !GFM_EMAIL.test(href)) {
+            const end = t.children!.findIndex((x, k) => k > i && x.type === 'link_close');
+            t.children!.splice(i, 1);
+            if (end > 0) t.children!.splice(end - 1, 1);
+          }
+        }
+      }
+    });
     md.core.ruler.push('mdv_headings', (state) => {
       const env = state.env as Partial<RenderEnv>;
       if (!env.slugger || !env.headings) return;
@@ -89,6 +114,16 @@ export function createMarkdown(opts: MarkdownOptions = {}): MarkdownIt {
       }
     });
   }
+  // 표 열 정렬은 style 대신 align 속성으로 낸다. 정제가 style 속성을 모두 지우기 때문이며, GFM 스펙 출력과도 같다 (SDD 8.1).
+  md.core.ruler.push('mdv_table_align', (state) => {
+    for (const t of state.tokens) {
+      if (t.type !== 'th_open' && t.type !== 'td_open') continue;
+      const m = /^text-align:(left|center|right)$/.exec(String(t.attrGet('style') ?? ''));
+      if (!m) continue;
+      t.attrs = (t.attrs ?? []).filter(([name]) => name !== 'style');
+      t.attrSet('align', m[1]);
+    }
+  });
   if (sourceMap) {
     md.core.ruler.push('mdv_source_map', (state) => {
       for (const t of state.tokens) {

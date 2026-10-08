@@ -17,6 +17,9 @@ const baseTheme = EditorView.theme({
   '.cm-searchMatch-selected': { backgroundColor: 'var(--find-current)' },
 });
 
+/** scrollToLine 뒤 같은 줄로 다시 맞추는 시간 */
+const SETTLE_MS = 1000;
+
 const lightTheme = [syntaxHighlighting(defaultHighlightStyle, { fallback: true }), EditorView.theme({}, { dark: false })];
 
 /**
@@ -33,12 +36,27 @@ export class SourceView {
   private theme = new Compartment();
   private wrapOn = true;
   private dark = false;
+  /** scrollToLine이 위치를 다시 맞추는 중인지. 이 동안의 스크롤은 사용자 스크롤로 치지 않는다. */
+  settling = false;
+  private settleId = 0;
+  /** 맞출 줄과 맞추기를 그만둘 시각(performance.now 기준) */
+  private target: { line: number; until: number } | null = null;
   private query: SearchQuery | null = null;
 
   constructor() {
     this.el = document.createElement('div');
     this.el.className = 'source-wrap';
     this.view = new EditorView({ parent: this.el, state: this.makeState('') });
+    // 사용자가 직접 스크롤하면 위치 맞추기를 멈춘다.
+    for (const ev of ['wheel', 'pointerdown', 'keydown', 'touchstart']) {
+      this.view.scrollDOM.addEventListener(ev, () => this.cancelSettle(), { passive: true });
+    }
+  }
+
+  private cancelSettle() {
+    this.target = null;
+    this.settleId++;
+    this.settling = false;
   }
 
   private makeState(text: string): EditorState {
@@ -58,11 +76,16 @@ export class SourceView {
         this.wrap.of(this.wrapOn ? EditorView.lineWrapping : []),
         this.theme.of(this.dark ? oneDark : lightTheme),
         baseTheme,
+        // 맞추는 시간 안에 줄 높이가 바뀌면(늦게 잰 줄 바꿈 등) 다시 맞춘다.
+        EditorView.updateListener.of((u) => {
+          if (this.target && (u.heightChanged || u.geometryChanged) && performance.now() < this.target.until) this.runSettle();
+        }),
       ],
     });
   }
 
   setText(docId: string, version: number, text: string) {
+    this.cancelSettle();
     this.docId = docId;
     this.docVersion = version;
     this.view.setState(this.makeState(text));
@@ -91,7 +114,35 @@ export class SourceView {
     return line + Math.min(1, Math.max(0, frac));
   }
 
+  /**
+   * 원문 줄로 스크롤한다. 화면 밖 줄(특히 줄 바꿈된 줄)은 추정 높이로 배치됐다가 그려진 뒤 실제 높이로 바뀌고,
+   * 편집기가 그 높이를 언제 잴지는 화면 사정에 따라 늦어질 수 있다. 그래서 1초 동안은 목표를 기억해 두고
+   * 프레임마다, 그리고 줄 높이가 바뀔 때마다 같은 목표로 다시 맞춘다. 사용자가 직접 스크롤하면 그만둔다.
+   */
   scrollToLine(line: number) {
+    this.target = { line, until: performance.now() + SETTLE_MS };
+    this.applyLine(line);
+    this.runSettle();
+  }
+
+  private runSettle() {
+    const id = ++this.settleId;
+    this.settling = true;
+    const dom = this.view.scrollDOM;
+    let stable = 0;
+    const step = () => {
+      const t = this.target;
+      if (id !== this.settleId || !t) return;
+      const before = dom.scrollTop;
+      this.applyLine(t.line);
+      stable = Math.abs(dom.scrollTop - before) > 1 ? 0 : stable + 1;
+      if (stable < 3 && performance.now() < t.until) requestAnimationFrame(step);
+      else this.settling = false;
+    };
+    requestAnimationFrame(step);
+  }
+
+  private applyLine(line: number) {
     const v = this.view;
     const doc = v.state.doc;
     const n = Math.min(doc.lines, Math.max(1, Math.floor(line) + 1));

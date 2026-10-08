@@ -51,6 +51,7 @@ export class ScrollSync {
   private onScroll(side: Side) {
     if (this.suspended || !this.isVisible(side)) return;
     if (side === 'preview' && this.preview.settling) return;
+    if (side === 'source' && this.source?.settling) return;
     if (this.leader && this.leader !== side) return;
     if (side === 'source' && !this.source) return;
     const line = this.lineOf(side);

@@ -1,21 +1,9 @@
+import type { HostDoc } from './bridge/types';
+import type { Encoding } from './encoding';
 import { docKey } from './render/paths';
 
-export type Encoding = 'utf-8' | 'utf-16le' | 'utf-16be' | 'cp949';
-export type Eol = 'CRLF' | 'LF' | 'CR' | 'Mixed' | 'None';
-
-/** 호스트 file.read 결과 (SDD 6.2) */
-export interface HostDoc {
-  path: string;
-  text: string;
-  encoding: Encoding;
-  hasBom: boolean;
-  eol: Eol;
-  size: number;
-  mtime: number;
-  decodeWarning: boolean;
-  kind: 'markdown' | 'text';
-  binary: boolean;
-}
+export type { HostDoc } from './bridge/types';
+export type { Encoding, Eol } from './encoding';
 
 /** 문서 모델 (SDD 5.1, ARCH-01·06) */
 export interface DocModel extends HostDoc {

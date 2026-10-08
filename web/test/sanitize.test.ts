@@ -1,13 +1,14 @@
 import { dom } from './dom';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createSanitizer } from '../src/render/sanitize';
+import { createSanitizer, type SanitizeContext } from '../src/render/sanitize';
 import { createMarkdown, renderMarkdown } from '../src/render/markdown';
 
 const s = createSanitizer(dom.window as unknown as Window);
-const ctx = { docDir: 'C:\\docs\\guide', allowRemoteImages: true };
+const api = (p: string) => '/api/file?path=' + encodeURIComponent(p);
+const ctx: SanitizeContext = { docDir: 'C:\\docs\\guide', allowRemoteImages: true, imageUrl: api };
 
-function clean(html: string, c = ctx): HTMLElement {
+function clean(html: string, c: SanitizeContext = ctx): HTMLElement {
   const div = dom.window.document.createElement('div');
   div.append(s.sanitize(html, c));
   return div as unknown as HTMLElement;
@@ -35,6 +36,9 @@ const PAYLOADS = [
   '<math><mtext><table><mglyph><style><img src=x onerror=alert(1)>',
   '<noscript><p title="</noscript><img src=x onerror=alert(1)>">',
   '<img src="x" srcset="javascript:alert(1) 1x">',
+  '<img src="a.png" srcset="http://127.0.0.1:7787/api/file?path=/etc/x 1x">',
+  '<table background="http://127.0.0.1:7787/x"><tr><td background="http://evil.example/y">x</td></tr></table>',
+  '<video poster="http://evil.example/p.png"></video><audio src="http://evil.example/a.mp3"></audio><picture><source srcset="http://evil.example/s.png"></picture>',
   '<body onload=alert(1)>',
   '<link rel=stylesheet href="https://evil.example/x.css">',
   '<a href="vbscript:msgbox(1)">x</a>',
@@ -47,10 +51,10 @@ test('XSS 페이로드에서 실행 가능한 요소·속성이 남지 않는다
     const all = [root, ...Array.from(root.querySelectorAll('*'))];
     for (const el of all) {
       const tag = el.tagName.toLowerCase();
-      assert.ok(!['script', 'iframe', 'object', 'embed', 'style', 'form', 'base', 'meta', 'link', 'body'].includes(tag), `${p} → <${tag}>`);
+      assert.ok(!['script', 'iframe', 'object', 'embed', 'style', 'form', 'base', 'meta', 'link', 'body', 'video', 'audio', 'source', 'picture'].includes(tag), `${p} → <${tag}>`);
       for (const attr of Array.from(el.attributes)) {
         assert.ok(!/^on/i.test(attr.name), `${p} → ${attr.name}`);
-        assert.ok(attr.name !== 'style' && attr.name !== 'srcset', `${p} → ${attr.name}`);
+        assert.ok(!['style', 'srcset', 'background', 'poster', 'ping'].includes(attr.name), `${p} → ${attr.name}`);
         assert.ok(!/^\s*(javascript|vbscript|data:text)/i.test(attr.value), `${p} → ${attr.name}=${attr.value}`);
       }
       if (tag === 'input') assert.equal(el.getAttribute('type'), 'checkbox', p);
@@ -83,16 +87,46 @@ test('링크 변환: 로컬 문서·조각·외부 (FR-NAV-03)', () => {
   assert.equal(a[5].getAttribute('data-mdv-path'), 'C:\\docs\\guide\\a b.md');
 });
 
-test('이미지 변환: 로컬은 file.mdview, 원격은 설정에 따라 (FR-REN-03, NFR-SEC-03)', () => {
+test('이미지 변환: 로컬은 브리지 주소, 원격은 설정에 따라 (FR-REN-03, NFR-SEC-03)', () => {
   const html = '<img src="img/그림 1.png"><img src="https://example.com/a.png"><img src="data:image/png;base64,AAAA"><img src="data:image/svg+xml,<svg/>">';
   let imgs = Array.from(clean(html).querySelectorAll('img'));
-  assert.equal(imgs[0].getAttribute('src'), 'https://file.mdview/' + encodeURIComponent('C:\\docs\\guide\\img\\그림 1.png'));
+  assert.equal(imgs[0].getAttribute('src'), api('C:\\docs\\guide\\img\\그림 1.png'));
   assert.equal(imgs[1].getAttribute('src'), 'https://example.com/a.png');
   assert.equal(imgs[2].getAttribute('src'), 'data:image/png;base64,AAAA');
   assert.equal(imgs[3].hasAttribute('src'), false);
   imgs = Array.from(clean(html, { ...ctx, allowRemoteImages: false }).querySelectorAll('img'));
   assert.equal(imgs[1].hasAttribute('src'), false);
   assert.equal(imgs[1].getAttribute('data-mdv-blocked'), 'https://example.com/a.png');
+  // 파일 핸들 브리지는 주소를 나중에 준다: 위치만 data-mdv-src로 남긴다.
+  imgs = Array.from(clean('<img src="../img/a.png">', { ...ctx, docDir: 'mdv:/d1/guide', imageUrl: () => null }).querySelectorAll('img'));
+  assert.equal(imgs[0].hasAttribute('src'), false);
+  assert.equal(imgs[0].getAttribute('data-mdv-src'), 'mdv:/d1/img/a.png');
+});
+
+test('POSIX 문서: /x는 실행기 루트 기준, 다른 형식의 경로는 막는다 (SDD 5.2)', () => {
+  const c = { ...ctx, docDir: '/home/me/repo/docs', docRoot: '/home/me/repo' };
+  const root = clean('<img src="/img/a.png"><img src="C:\\x.png"><a href="../README.md">r</a>', c);
+  const imgs = Array.from(root.querySelectorAll('img'));
+  assert.equal(imgs[0].getAttribute('src'), api('/home/me/repo/img/a.png'));
+  assert.equal(imgs[1].hasAttribute('src'), false);
+  assert.equal(root.querySelector('a')?.getAttribute('data-mdv-path'), '/home/me/repo/README.md');
+});
+
+test('문서가 쓴 루프백·실행기 주소 이미지는 지우고, 링크는 눌러야 열리는 외부 링크로 둔다 (NFR-SEC-02, SDD 8.4)', () => {
+  const root = clean(
+    '<img src="http://127.0.0.1:7787/api/file?path=/etc/passwd"><img src="http://[::1]/a.png"><img src="http://2130706433/x.png">' +
+      '<a href="http://localhost:7787/api/stop">a</a><a href="http://10.0.0.9:7787/x">b</a>',
+    { ...ctx, selfOrigin: 'http://10.0.0.9:7787' },
+  );
+  assert.ok(Array.from(root.querySelectorAll('img')).every((i) => !i.hasAttribute('src')));
+  const links = Array.from(root.querySelectorAll('a')).map((a) => a.getAttribute('data-mdv-ext'));
+  assert.deepEqual(links, ['http://localhost:7787/api/stop', 'http://10.0.0.9:7787/x'], '토큰 없이 새 탭으로 열리므로 위험하지 않다');
+});
+
+test('표 열 정렬은 정제 뒤에도 남는다 (FR-REN-01)', () => {
+  const { html } = renderMarkdown(createMarkdown(), '| 왼 | 가운데 | 오른 |\n| :-- | :-: | --: |\n| a | b | c |\n');
+  const ths = Array.from(clean(html).querySelectorAll('th'));
+  assert.deepEqual(ths.map((t) => t.getAttribute('align')), ['left', 'center', 'right']);
 });
 
 test('작업 목록 체크박스는 비활성으로 남는다', () => {
@@ -103,17 +137,15 @@ test('작업 목록 체크박스는 비활성으로 남는다', () => {
   assert.ok(box?.hasAttribute('checked'));
 });
 
-test('다른 네트워크 공유·앱 내부 주소는 막고, 같은 공유는 허용 (리뷰 #1)', () => {
-  const html =
-    '<img src="//evil-host/share/a.png"><img src="\\\\evil\\s\\b.png"><img src="https://file.mdview/%5C%5Cevil%5Cs%5Cc.png">' +
-    '<a href="//evil/share/x.md">a</a><a href="https://app.mdview/index.html">b</a>';
+test('다른 네트워크 공유는 막고, 같은 공유는 허용 (리뷰 #1)', () => {
+  const html = '<img src="//evil-host/share/a.png"><img src="\\\\evil\\s\\b.png"><a href="//evil/share/x.md">a</a>';
   const root = clean(html);
   const imgs = Array.from(root.querySelectorAll('img'));
   assert.ok(imgs.every((i) => !i.hasAttribute('src')), imgs.map((i) => i.getAttribute('src')).join(' | '));
   const links = Array.from(root.querySelectorAll('a'));
   assert.ok(links.every((a) => !a.hasAttribute('data-mdv-path') && !a.hasAttribute('data-mdv-ext') && !a.hasAttribute('href')));
-  const unc = clean('<img src="img/a.png"><a href="../b.md">b</a>', { docDir: '\\\\nas\\docs\\guide', allowRemoteImages: true });
-  assert.equal(unc.querySelector('img')?.getAttribute('src'), 'https://file.mdview/' + encodeURIComponent('\\\\nas\\docs\\guide\\img\\a.png'));
+  const unc = clean('<img src="img/a.png"><a href="../b.md">b</a>', { ...ctx, docDir: '\\\\nas\\docs\\guide' });
+  assert.equal(unc.querySelector('img')?.getAttribute('src'), api('\\\\nas\\docs\\guide\\img\\a.png'));
   assert.equal(unc.querySelector('a')?.getAttribute('data-mdv-path'), '\\\\nas\\docs\\b.md');
 });
 

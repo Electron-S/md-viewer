@@ -1,6 +1,6 @@
-import { createBridge, HostError } from './bridge';
+import { createBridge, HostError, type HostDoc, type PathEntry, type ReadyInfo } from './bridge';
 import { CommandRegistry } from './commands';
-import { DocStore, encodingLabel, formatSize, type DocModel, type Encoding, type HostDoc } from './docs';
+import { DocStore, encodingLabel, formatSize, type DocModel, type Encoding } from './docs';
 import { createMarkdown, renderMarkdown, scanHeadings, type Heading } from './render/markdown';
 import { basename, dirname, docKey } from './render/paths';
 import { createSanitizer, isViewablePath } from './render/sanitize';
@@ -22,22 +22,6 @@ import { FindBar } from './ui/findbar';
 import { showDialog, toast } from './ui/dialog';
 import { applyPageStrings, S } from './strings';
 
-interface PathEntry {
-  path: string;
-  isDir: boolean;
-}
-
-interface ReadyInfo {
-  args: PathEntry[];
-  settings: string | null;
-  session: string | null;
-  portable: boolean;
-  version: string;
-  webview2: string;
-  dataDir?: string;
-  trace?: boolean;
-}
-
 interface Rendered {
   docId: string;
   version: number;
@@ -46,6 +30,8 @@ interface Rendered {
   /** 정제된 문서 노드. 보이는 동안은 미리보기로 옮겨 가 비어 있다. */
   frag?: DocumentFragment;
   message?: { text: string; action?: { label: string; run: () => void } };
+  /** 폴더 접근이 없어 따라갈 수 없는 상대 경로 이미지·링크가 있는지 (독립 모드 단독 파일, SDD 7.2-6) */
+  needsFolder?: boolean;
 }
 
 const ENCODINGS: { id: Encoding; label: string }[] = [
@@ -98,6 +84,12 @@ export class App {
   private saveSettings = new Debouncer(() => this.persistSettings(), 300);
   private systemDark = window.matchMedia('(prefers-color-scheme: dark)');
   private started = false;
+  /** 독립 모드에서 권한을 다시 받아야 하는 저장된 루트 수 */
+  private restorable = 0;
+  /** 이 뷰어 탭의 id. 같은 origin의 뷰어 탭끼리 세션 주인과 자리 넘기기를 가린다. */
+  private readonly viewerId = Math.random().toString(36).slice(2) + Date.now().toString(36);
+  /** 새 뷰어 탭에 자리를 넘기고 물러났는지 */
+  private retired = false;
 
   private viewsEl = $('views');
   private emptyEl = $('empty');
@@ -110,31 +102,30 @@ export class App {
     this.buildLayout();
     this.registerCommands();
     this.menubar = new MenuBar($('menubar'), this.cmds, this.menus());
-    this.tabbar = new TabBar($('tabbar'), this.tabs, (id) => this.docs.get(id));
+    this.tabbar = new TabBar($('tabbar'), this.tabs, (id) => this.docs.get(id), (p) => this.bridge.displayPath(p));
     this.tabbar.onClose = (id) => this.closeTab(id);
     this.tabbar.onOpenDialog = () => this.cmds.run('file.open');
     this.statusbar = new StatusBar($('statusbar'));
     this.statusbar.onEncodingClick = () => this.menubar.open(this.menuIndex(S.menu.encoding), true);
     this.bindEvents();
-    this.trace('script');
 
-    // 1) 첫 화면: 호스트가 index.html에 넣어 준 부트 데이터로 그린다 (SDD 7.4, NFR-PERF-01).
-    //    부트 데이터가 없으면(새로 고침 등) 바로 연결해 app.ready로 받는다.
-    const boot = readBoot();
-    if (!boot) this.bridge.connect();
+    // 1) 첫 탭까지 그린다 (SDD 7.5, NFR-PERF-01).
     let ready: ReadyInfo;
     try {
-      ready = boot?.ready ?? (await this.bridge.request<ReadyInfo>('app.ready'));
+      ready = await this.bridge.request<ReadyInfo>('app.ready');
     } catch (err) {
       toast(S.toast.hostInitFailed((err as Error).message), 'error');
-      ready = { args: [], settings: null, session: null, portable: false, version: '?', webview2: '?' };
+      ready = { mode: this.bridge.mode, args: [], settings: null, session: null, version: '?', roots: [], restorable: 0 };
     }
+    this.restorable = ready.restorable;
     this.info = ready;
     this.settings = parseSettings(ready.settings);
     this.session = parseSession(ready.session);
     this.applyTheme();
     this.applyZoom();
     this.applySidePanel();
+    this.claimSession();
+    void this.bridge.request('handles.remember', { on: this.settings.rememberHandles }).catch(() => {});
     if (this.session.workspace) this.workspace.setRoot(this.session.workspace);
 
     const args = ready.args ?? [];
@@ -143,7 +134,7 @@ export class App {
     const firstPath = firstArg?.path ?? sess.tabs[sess.activeIndex]?.path;
     if (firstPath) {
       const fromSession = sess.tabs.find((t) => docKey(t.path) === docKey(firstPath));
-      const h = boot?.doc && docKey(boot.doc.path) === docKey(firstPath) ? boot.doc : await this.readDoc(firstPath).catch(() => null);
+      const h = await this.readDoc(firstPath).catch(() => null);
       if (h) {
         const doc = this.docs.upsert(h);
         const init = fromSession && !firstArg ? { mode: fromSession.mode, line: fromSession.line } : { mode: this.defaultMode(doc) };
@@ -156,24 +147,85 @@ export class App {
     this.tabbar.render();
     document.body.dataset.ready = '1';
     await nextPaint();
-    this.trace('first-paint');
+    // 첫 탭을 그린 시각(페이지 탐색 시작 기준 ms). 시작 시간 계측에 쓴다 (NFR-PERF-01).
+    (window as any).__mdvReadyAt = performance.now();
 
-    // 2) 호스트와 연결하고 나머지(세션의 다른 탭, 다른 인자, 그사이 들어온 인자)를 연다.
+    // 2) 실행기 이벤트에 붙고 나머지(세션의 다른 탭, 다른 인자)를 연다.
     this.bridge.connect();
-    let later: PathEntry[] = [];
-    if (boot) {
-      try {
-        later = (await this.bridge.request<ReadyInfo>('app.ready')).args ?? [];
-      } catch (err) {
-        this.logError(S.log.appReadyFailed((err as Error).message));
-      }
-    }
     await this.restoreTabs(sess, firstPath).catch((err) => this.logError(S.log.restoreFailed((err as Error).message)));
     if (args.length) await this.openEntries(args);
-    if (later.length) await this.openEntries(later);
     this.updateWatch();
     this.saveSession.trigger();
+    if (!this.tabs.active()) this.renderRecentList();
+    this.joinViewers();
     document.body.dataset.restored = '1';
+  }
+
+  // ------------------------------------------------------------------ 뷰어 탭 여럿 (SDD 7.3)
+
+  /** 세션은 마지막으로 쓴(보고 있는) 뷰어 탭만 저장한다. 여러 탭이 같은 저장소를 번갈아 덮지 않게 한다. */
+  private claimSession() {
+    try {
+      localStorage.setItem('mdv.sessionOwner', this.viewerId);
+    } catch {
+      // 저장소가 없으면 세션도 없다.
+    }
+  }
+
+  private ownsSession(): boolean {
+    try {
+      const owner = localStorage.getItem('mdv.sessionOwner');
+      return !owner || owner === this.viewerId;
+    } catch {
+      return true;
+    }
+  }
+
+  /**
+   * 실행기 모드: 같은 origin에 뷰어 탭은 하나만 둔다. 새 탭이 뜨면 이전 탭은 열린 문서 목록을 넘기고 물러난다.
+   * 탭마다 실행기 연결(SSE)을 하나씩 잡으면 브라우저의 호스트당 연결 한도(6개)를 금방 다 쓰기 때문이다.
+   */
+  private joinViewers() {
+    if (this.bridge.mode !== 'launcher' || typeof BroadcastChannel === 'undefined') return;
+    const ch = new BroadcastChannel('mdview-viewers');
+    ch.onmessage = (e: MessageEvent) => {
+      const m = e.data;
+      if (!m || m.from === this.viewerId || this.retired) return;
+      if (m.type === 'hello') {
+        ch.postMessage({ type: 'handover', from: this.viewerId, to: m.from, tabs: this.sessionData().tabs, workspace: this.session.workspace });
+        this.retire();
+        ch.close();
+      } else if (m.type === 'handover' && m.to === this.viewerId) {
+        void this.adoptTabs(m.tabs ?? [], m.workspace ?? null);
+      }
+    };
+    ch.postMessage({ type: 'hello', from: this.viewerId });
+  }
+
+  /** 이전 뷰어 탭이 넘긴 문서 중 아직 열지 않은 것을 연다. 지금 보는 탭은 그대로 둔다. */
+  private async adoptTabs(tabs: { path: string; mode: ViewMode; line: number }[], workspace: string | null) {
+    const active = this.tabs.activeId;
+    for (const t of tabs) {
+      if (!this.tabs.byDoc(docKey(t.path))) await this.openFile(t.path, { activate: false, mode: t.mode, line: t.line });
+    }
+    if (workspace && !this.session.workspace) this.setWorkspace(workspace);
+    if (active != null) this.tabs.activate(active);
+    else if (this.tabs.tabs[0]) this.tabs.activate(this.tabs.tabs[0].id);
+    this.updateWatch();
+  }
+
+  /** 새 뷰어 탭에 자리를 넘겼다. 연결과 세션 저장을 멈추고, 닫을 수 있으면 닫는다. */
+  private retire() {
+    this.retired = true;
+    this.bridge.disconnect();
+    void this.bridge.request('watch.set', { paths: [] }).catch(() => {});
+    window.close();
+    // 스크립트로 닫을 수 없는 탭이면 물러났다는 안내만 남긴다.
+    for (const t of [...this.tabs.tabs]) this.tabs.close(t.id);
+    this.viewsEl.hidden = true;
+    this.emptyEl.hidden = false;
+    this.emptyEl.replaceChildren(Object.assign(document.createElement('p'), { className: 'retired', textContent: S.retired.text }));
+    document.title = S.retired.title;
   }
 
   private buildLayout() {
@@ -216,6 +268,7 @@ export class App {
     this.bindResizer();
     $('empty-open').addEventListener('click', () => this.cmds.run('file.open'));
     $('empty-folder').addEventListener('click', () => this.cmds.run('file.openFolder'));
+    $('empty-restore').addEventListener('click', () => this.cmds.run('file.restoreSession'));
   }
 
   private bindEvents() {
@@ -241,12 +294,12 @@ export class App {
       e.dataTransfer.dropEffect = 'copy';
     });
     document.addEventListener('drop', (e) => {
-      const files = e.dataTransfer?.files;
-      if (!files || !files.length) return;
+      if (!e.dataTransfer?.types.includes('Files')) return;
       e.preventDefault();
+      // 끌어다 놓은 항목은 이 처리기 안에서만 꺼낼 수 있다.
       void this.bridge
-        .request<{ entries: PathEntry[] }>('drop.paths', {}, Array.from(files))
-        .then((r) => this.openEntries(r.entries))
+        .takeDrop(e.dataTransfer)
+        .then((entries) => this.openEntries(entries))
         .catch((err) => this.reportError(err));
     });
 
@@ -278,12 +331,25 @@ export class App {
 
     this.systemDark.addEventListener('change', () => this.applyTheme());
 
-    this.bridge.on('open.paths', (p: { paths: PathEntry[] }) => void this.openEntries(p.paths));
     this.bridge.on('file.changed', (p: { path: string }) => void this.reloadPath(p.path));
     this.bridge.on('file.deleted', (p: { path: string }) => {
       this.docs.markDeleted(p.path);
     });
-    this.bridge.on('app.closing', () => void this.quit());
+    this.bridge.on('bridge.offline', () => this.statusbar.setOffline(true));
+    this.bridge.on('bridge.online', () => this.statusbar.setOffline(false));
+    // 브라우저 탭을 닫거나 새로 고칠 때 마지막 상태를 바로 저장한다 (NFR-REL-02).
+    const flush = () => {
+      this.saveSession.flush();
+      this.saveSettings.flush();
+    };
+    window.addEventListener('pagehide', flush);
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') flush();
+      else if (!this.retired) this.claimSession();
+    });
+    window.addEventListener('focus', () => {
+      if (!this.retired) this.claimSession();
+    });
 
     this.cmds.onError = (err) => this.reportError(err);
     window.addEventListener('error', (e) => this.logError(e.message));
@@ -424,6 +490,7 @@ export class App {
 
   /** 활성 탭을 화면에 맞춘다. 내용이 같으면 다시 그리지 않고, 저장한 원문 줄로 돌아간다. */
   showActive() {
+    if (this.retired) return;
     const tab = this.tabs.active();
     const doc = tab ? this.docs.get(tab.docId) : undefined;
     if (!tab || !doc) {
@@ -505,7 +572,41 @@ export class App {
     this.stashShown();
     if (r.message) this.preview.setMessage(r.message.text, r.message.action);
     else this.preview.setContent(r.frag!);
+    this.preview.setNotice(r.needsFolder ? { text: S.preview.needFolder, action: { label: S.preview.openFolder, run: () => void this.openFolderForActive() } } : null);
     this.shown = { docId: r.docId, version: r.version, allowRemote: r.allowRemote };
+  }
+
+  /** 브리지가 나중에 주소를 주는 로컬 이미지(data-mdv-src)를 채운다 (SDD 8.1). */
+  private loadImages(root: ParentNode) {
+    for (const img of Array.from(root.querySelectorAll<HTMLImageElement>('img[data-mdv-src]'))) {
+      const path = img.getAttribute('data-mdv-src')!;
+      void this.bridge.loadImage(path).then((url) => {
+        if (!url) return;
+        img.src = url;
+        img.removeAttribute('data-mdv-src');
+      });
+    }
+  }
+
+  /** 단독 파일로 연 문서를 그 문서가 든 폴더 기준으로 다시 연다 (SDD 7.2-6). */
+  private async openFolderForActive() {
+    const tab = this.tabs.active();
+    const doc = this.activeDoc();
+    if (!tab || !doc) return;
+    const r = await this.bridge.request<{ path: string | null }>('dialog.openFolder').catch((err) => {
+      this.reportError(err);
+      return { path: null };
+    });
+    if (!r.path) return;
+    this.setWorkspace(r.path, true);
+    const moved = await this.bridge.request<{ path: string | null }>('file.relocate', { path: doc.path, dir: r.path });
+    if (!moved.path) {
+      toast(S.toast.notInFolder, 'error');
+      return;
+    }
+    const { mode, line } = tab;
+    await this.openFile(moved.path, { mode, line });
+    this.closeTab(tab.id);
   }
 
   /** 보이던 문서 노드를 캐시로 되돌린다 (복제하지 않고 옮긴다). */
@@ -548,7 +649,15 @@ export class App {
         const out = renderMarkdown(this.md, doc.text);
         r.headings = out.headings;
         for (const e of out.errors) this.logError(S.log.blockFailed(doc.path, e.line, e.message));
-        r.frag = this.sanitizer.sanitize(out.html, { docDir: dirname(doc.path), allowRemoteImages: allowRemote });
+        r.frag = this.sanitizer.sanitize(out.html, {
+          docDir: dirname(doc.path),
+          docRoot: this.bridge.rootOf(doc.path),
+          allowRemoteImages: allowRemote,
+          imageUrl: (p) => this.bridge.imageUrl(p),
+          selfOrigin: /^https?:/.test(location.protocol) ? location.origin : undefined,
+        });
+        this.loadImages(r.frag);
+        r.needsFolder = !this.bridge.canResolveRelative(doc.path) && !!r.frag.querySelector('img[data-mdv-src], a[data-mdv-path]');
       } catch (err) {
         // FR-REN-04: 블록 하나의 실패는 renderMarkdown이 그 블록만 바꾼다. 여기는 파싱·정제 자체가 실패했을 때다.
         this.logError(S.log.renderFailed(doc.path, (err as Error).message));
@@ -661,7 +770,6 @@ export class App {
     const dark = this.isDark();
     document.documentElement.dataset.theme = dark ? 'dark' : 'light';
     this.source?.setDark(dark);
-    void this.bridge.request('window.setTheme', { dark }).catch(() => {});
   }
 
   private setTheme(theme: Theme) {
@@ -760,21 +868,50 @@ export class App {
       list.append(li);
     }
     $('empty-recent-title').hidden = !this.session.recentFiles.length;
+    $('empty-restore').hidden = this.restorable <= 0;
+  }
+
+  /** 독립 모드: 저장해 둔 핸들에 권한을 다시 받아 지난 세션을 연다 (SDD 7.4). 클릭 처리기에서 부른다. */
+  private async restoreSession() {
+    const r = await this.bridge.request<{ restored: number }>('session.restore');
+    this.restorable = 0;
+    if (!r.restored) {
+      toast(S.toast.restoreNone);
+      this.renderRecentList();
+      return;
+    }
+    if (this.session.workspace) this.workspace.setRoot(this.session.workspace);
+    await this.restoreTabs(this.session);
+    const t = this.tabs.tabs[this.session.activeIndex];
+    if (t) this.tabs.activate(t.id);
+    this.updateWatch();
+    if (!this.tabs.active()) this.renderRecentList();
   }
 
   // ------------------------------------------------------------------ 저장·종료
 
+  /** 저장할 세션. 다음에 다시 열 수 없는 위치(핸들 없는 파일 등)는 탭·최근 목록에서 뺀다. */
   private sessionData(): SessionData {
-    const tabs = this.tabs.tabs;
+    const keep = (p: string) => this.bridge.isRestorable(p);
+    const tabs = this.tabs.tabs.filter((t) => keep(t.path));
+    const live = tabs.map((t) => ({ path: t.path, mode: t.mode, line: Math.round(t.line * 100) / 100 }));
+    // 독립 모드: 권한을 다시 받지 못해 아직 못 연 지난 세션의 탭은 "이전 문서 다시 열기"를 누를 때까지 남겨 둔다.
+    // 그러지 않으면 열자마자 빈 세션이 저장돼, 복원하기 전에 새로 고치면 지난 탭을 잃는다.
+    const pending = this.session.tabs.filter((t) => this.bridge.isPending(t.path) && !live.some((x) => docKey(x.path) === docKey(t.path)));
+    const active = tabs.findIndex((t) => t.id === this.tabs.activeId);
     return {
       ...this.session,
       schemaVersion: SCHEMA_VERSION,
-      tabs: tabs.map((t) => ({ path: t.path, mode: t.mode, line: Math.round(t.line * 100) / 100 })),
-      activeIndex: Math.max(0, tabs.findIndex((t) => t.id === this.tabs.activeId)),
+      tabs: [...live, ...pending],
+      activeIndex: active >= 0 || live.length ? Math.max(0, active) : Math.max(0, pending.indexOf(this.session.tabs[this.session.activeIndex])),
+      workspace: this.session.workspace && keep(this.session.workspace) ? this.session.workspace : null,
+      recentFiles: this.session.recentFiles.filter(keep),
+      recentFolders: this.session.recentFolders.filter(keep),
     };
   }
 
   private persistSession() {
+    if (this.retired || !this.ownsSession()) return;
     const data = JSON.stringify(this.sessionData(), null, 2);
     void this.bridge.request('store.save', { name: 'session', data }).catch((err) => this.logError(String(err)));
   }
@@ -784,26 +921,10 @@ export class App {
     void this.bridge.request('store.save', { name: 'settings', data: JSON.stringify(data, null, 2) }).catch((err) => this.logError(String(err)));
   }
 
-  private async quit() {
-    this.saveSettings.flush();
-    try {
-      await this.bridge.request('store.save', { name: 'session', data: JSON.stringify(this.sessionData(), null, 2) });
-    } finally {
-      await this.bridge.request('app.quit').catch(() => {});
-    }
-  }
-
   private reportError(err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     toast(msg, 'error');
     this.logError(msg);
-  }
-
-  /** 시작 단계 계측 (MDVIEW_TRACE=1). 연결 전에는 줄 세워 두므로 화면 시각(epoch ms)을 함께 보낸다. */
-  private trace(msg: string) {
-    if (this.info && !this.info.trace) return;
-    const at = performance.timeOrigin + performance.now();
-    void this.bridge.request('app.log', { level: 'trace', msg, at }).catch(() => {});
   }
 
   private logError(msg: string) {
@@ -873,21 +994,21 @@ export class App {
         if (doc) await this.reloadPath(doc.path);
       },
     });
-    c.register({ id: 'file.closeTab', title: S.cmd.fileCloseTab, keys: ['Ctrl+W', 'Ctrl+F4'], enabled: hasTab, run: () => this.closeTab(this.tabs.activeId!) });
+    c.register({ id: 'file.closeTab', title: S.cmd.fileCloseTab, keys: ['Alt+W'], enabled: hasTab, run: () => this.closeTab(this.tabs.activeId!) });
     c.register({
       id: 'file.closeOthers', title: S.cmd.fileCloseOthers, enabled: () => this.tabs.tabs.length > 1,
       run: () => this.tabs.closeOthers(this.tabs.activeId!),
     });
     c.register({
-      id: 'file.reopenClosed', title: S.cmd.fileReopenClosed, keys: ['Ctrl+Shift+T'], enabled: () => this.tabs.closed.length > 0,
+      id: 'file.reopenClosed', title: S.cmd.fileReopenClosed, keys: ['Alt+Shift+T'], enabled: () => this.tabs.closed.length > 0,
       run: async () => {
         const t = this.tabs.popClosed();
         if (t) await this.openFile(t.path, { mode: t.mode, line: t.line });
       },
     });
-    c.register({ id: 'file.copyPath', title: S.cmd.fileCopyPath, enabled: hasTab, run: () => this.copyText(this.activeDoc()!.path) });
+    c.register({ id: 'file.copyPath', title: S.cmd.fileCopyPath, enabled: hasTab, run: () => this.copyText(this.bridge.displayPath(this.activeDoc()!.path)) });
     c.register({
-      id: 'file.reveal', title: S.cmd.fileReveal, enabled: hasTab,
+      id: 'file.reveal', title: S.cmd.fileReveal, enabled: () => hasTab() && this.bridge.caps.reveal && !/^mdv:/i.test(this.activeDoc()!.path),
       run: () => this.bridge.request('shell.reveal', { path: this.activeDoc()!.path }),
     });
     c.register({ id: 'file.print', title: S.cmd.filePrint, keys: ['Ctrl+P'], enabled: hasTab, run: () => this.print() });
@@ -900,7 +1021,7 @@ export class App {
         if (!this.tabs.active()) this.renderRecentList();
       },
     });
-    c.register({ id: 'app.exit', title: S.cmd.appExit, run: () => window.close() });
+    c.register({ id: 'file.restoreSession', title: S.cmd.fileRestoreSession, enabled: () => this.restorable > 0, run: () => this.restoreSession() });
 
     c.register({ id: 'view.preview', title: S.mode.preview, keys: ['Ctrl+1'], enabled: hasTab, checked: modeIs('preview'), run: () => this.setMode('preview') });
     c.register({ id: 'view.source', title: S.mode.source, keys: ['Ctrl+2'], enabled: hasTab, checked: modeIs('source'), run: () => this.setMode('source') });
@@ -944,8 +1065,23 @@ export class App {
       },
     });
 
-    c.register({ id: 'tab.next', title: S.cmd.tabNext, keys: ['Ctrl+Tab', 'Ctrl+PageDown'], enabled: () => this.tabs.tabs.length > 1, run: () => this.tabs.cycle(1) });
-    c.register({ id: 'tab.prev', title: S.cmd.tabPrev, keys: ['Ctrl+Shift+Tab', 'Ctrl+PageUp'], enabled: () => this.tabs.tabs.length > 1, run: () => this.tabs.cycle(-1) });
+    c.register({
+      id: 'view.rememberHandles', title: S.cmd.rememberHandles, checked: () => this.settings.rememberHandles,
+      run: () => {
+        this.settings.rememberHandles = !this.settings.rememberHandles;
+        void this.bridge.request('handles.remember', { on: this.settings.rememberHandles });
+        this.saveSettings.trigger();
+        this.saveSession.trigger();
+      },
+    });
+    // v1.1 이후 기능의 단축키(SRS 4.2). 기능은 없지만 키를 잡아 브라우저 기본 동작(뒤로 가기·즐겨찾기 등)으로 빠지지 않게 한다.
+    const later: [string, string][] = [
+      ['nav.back', 'Alt+Left'], ['nav.forward', 'Alt+Right'], ['nav.gotoLine', 'Ctrl+G'], ['nav.quickOpen', 'Ctrl+Shift+O'], ['find.inFolder', 'Ctrl+Shift+F'],
+    ];
+    for (const [id, key] of later) c.register({ id, title: S.cmd.reserved, keys: [key], reserved: true, run: () => toast(S.toast.notYet) });
+
+    c.register({ id: 'tab.next', title: S.cmd.tabNext, keys: ['Alt+PageDown'], enabled: () => this.tabs.tabs.length > 1, run: () => this.tabs.cycle(1) });
+    c.register({ id: 'tab.prev', title: S.cmd.tabPrev, keys: ['Alt+PageUp'], enabled: () => this.tabs.tabs.length > 1, run: () => this.tabs.cycle(-1) });
 
     c.register({ id: 'find.open', title: S.cmd.findOpen, keys: ['Ctrl+F'], enabled: hasTab, run: () => this.findbar.open(this.findPrefill()) });
     c.register({ id: 'find.next', title: S.cmd.findNext, keys: ['F3'], enabled: hasTab, run: () => this.findbar.step(1) });
@@ -966,23 +1102,22 @@ export class App {
   private menus(): MenuDef[] {
     const recentFiles = (): MenuEntry[] =>
       this.session.recentFiles.length
-        ? this.session.recentFiles.map((p) => ({ label: p, run: () => void this.openFile(p) }))
+        ? this.session.recentFiles.map((p) => ({ label: this.bridge.displayPath(p), run: () => void this.openFile(p) }))
         : [{ label: S.menu.none, disabled: true }];
     const recentFolders = (): MenuEntry[] =>
       this.session.recentFolders.length
-        ? this.session.recentFolders.map((p) => ({ label: p, run: () => this.setWorkspace(p, true) }))
+        ? this.session.recentFolders.map((p) => ({ label: this.bridge.displayPath(p), run: () => this.setWorkspace(p, true) }))
         : [{ label: S.menu.none, disabled: true }];
     return [
       {
         label: S.menu.file, key: 'F',
         items: () => [
-          { cmd: 'file.open' }, { cmd: 'file.openFolder' },
+          { cmd: 'file.open' }, { cmd: 'file.openFolder' }, { cmd: 'file.restoreSession' },
           { label: S.menu.recentFiles, sub: recentFiles }, { label: S.menu.recentFolders, sub: recentFolders }, { cmd: 'file.clearRecent' },
           { sep: true }, { cmd: 'file.reload' },
           { sep: true }, { cmd: 'file.closeTab' }, { cmd: 'file.closeOthers' }, { cmd: 'file.reopenClosed' },
           { sep: true }, { cmd: 'file.copyPath' }, { cmd: 'file.reveal' },
           { sep: true }, { cmd: 'file.print' },
-          { sep: true }, { cmd: 'app.exit' },
         ],
       },
       {
@@ -1011,7 +1146,7 @@ export class App {
           ];
         },
       },
-      { label: S.menu.settings, key: 'T', items: () => [{ cmd: 'view.remoteImages' }] },
+      { label: S.menu.settings, key: 'T', items: () => [{ cmd: 'view.remoteImages' }, ...(this.bridge.mode === 'standalone' ? [{ cmd: 'view.rememberHandles' }] : [])] },
       { label: S.menu.help, key: 'H', items: () => [{ cmd: 'help.shortcuts' }, { cmd: 'help.about' }] },
     ];
   }
@@ -1024,7 +1159,7 @@ export class App {
     const table = document.createElement('table');
     table.className = 'shortcut-table';
     for (const cmd of this.cmds.all()) {
-      if (!cmd.keys?.length) continue;
+      if (!cmd.keys?.length || cmd.reserved) continue;
       const tr = document.createElement('tr');
       tr.append(
         Object.assign(document.createElement('td'), { textContent: cmd.title.replace(/…$/, '') }),
@@ -1040,44 +1175,22 @@ export class App {
     const body = document.createElement('div');
     const lines = [
       S.dialog.version(i?.version ?? '?'),
-      S.dialog.webview2(i?.webview2 ?? '?'),
-      i?.portable ? S.dialog.portable : S.dialog.installed,
-      i?.dataDir ? S.dialog.dataDir(i.dataDir) : '',
-    ].filter(Boolean);
+      this.bridge.mode === 'launcher' ? S.dialog.modeLauncher : S.dialog.modeStandalone,
+      S.dialog.storage,
+    ];
     for (const l of lines) body.append(Object.assign(document.createElement('p'), { textContent: l }));
     void showDialog(S.cmd.helpAbout, body);
   }
 }
 
-/** 원문 보기 번들(source.js)을 한 번만 불러온다. */
+/**
+ * 원문 보기(CodeMirror)를 처음 쓸 때 실행한다 (SDD 7.5). 빌드가 그 번들을 `__mdvLoadSource` 함수로 감싸
+ * 같은 스크립트에 넣어 두므로, 시작할 때는 구문만 훑고 실제 실행은 이때 한다.
+ */
 function loadSourceBundle(): Promise<typeof SourceView> {
   const w = window as any;
-  if (w.__mdvSourceView) return Promise.resolve(w.__mdvSourceView);
-  return new Promise((resolve, reject) => {
-    const s = document.createElement('script');
-    s.src = 'source.js';
-    s.onload = () => (w.__mdvSourceView ? resolve(w.__mdvSourceView) : reject(new Error(S.error.sourceModuleMissing)));
-    s.onerror = () => reject(new Error(S.error.sourceModuleLoad));
-    document.head.append(s);
-  });
-}
-
-interface Boot {
-  ready: ReadyInfo;
-  doc?: HostDoc;
-}
-
-/** 호스트가 index.html에 넣어 준 부트 데이터를 한 번만 읽는다. */
-function readBoot(): Boot | null {
-  const el = document.getElementById('mdv-boot');
-  if (!el) return null;
-  el.remove();
-  try {
-    const v = JSON.parse(el.textContent ?? '');
-    return v && typeof v === 'object' && v.ready ? (v as Boot) : null;
-  } catch {
-    return null;
-  }
+  if (!w.__mdvSourceView && typeof w.__mdvLoadSource === 'function') w.__mdvLoadSource();
+  return w.__mdvSourceView ? Promise.resolve(w.__mdvSourceView) : Promise.reject(new Error(S.error.sourceModuleMissing));
 }
 
 function nextPaint(): Promise<void> {

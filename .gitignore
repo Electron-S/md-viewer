@@ -1,5 +1,7 @@
 node_modules/
 build/
 dist/
-lib/
+__pycache__/
 *.log
+# 예전 데스크톱 앱(WebView2) 빌드가 받아 두던 SDK
+lib/

@@ -1,7 +1,7 @@
 import { dom } from './dom';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { classifyUrl, dirname, docKey, normalizePath, resolveLocalUrl, resolvePath, splitRoot } from '../src/render/paths';
+import { classifyUrl, dirname, docKey, isInside, isInternalUrl, joinPath, normalizePath, pathStyle, resolveLocalUrl, resolvePath, splitRoot } from '../src/render/paths';
 import { CommandRegistry, eventToKey } from '../src/commands';
 import { parseSession, parseSettings, pushRecent, Debouncer } from '../src/session';
 import { buildRegex, findRanges } from '../src/views/find';
@@ -10,6 +10,7 @@ import { DocStore, countChars, countLines, countWords, encodingLabel, type HostD
 import { PreviewView } from '../src/views/preview';
 import type { SourceView } from '../src/views/source';
 import { ScrollSync } from '../src/views/sync';
+import { MenuBar } from '../src/ui/menubar';
 
 void dom;
 
@@ -28,6 +29,46 @@ test('경로: 드라이브·UNC·WSL 정규화와 상대 경로 해석', () => {
   assert.equal(classifyUrl('javascript:x'), 'blocked');
   assert.equal(classifyUrl('#a'), 'fragment');
   assert.equal(classifyUrl('HTTPS://x'), 'external');
+  // 드라이브 루트·공유 루트를 폴더로 줄 때 (실행기의 허용 폴더가 D:\ 같은 경우)
+  assert.ok(isInside('D:\\a\\b.md', 'D:\\'));
+  assert.ok(isInside('d:\\A.md', 'D:\\'));
+  assert.ok(isInside('\\\\Srv\\Share\\x.md', '\\\\srv\\share\\'));
+  assert.ok(!isInside('E:\\a.md', 'D:\\'));
+});
+
+test('경로: POSIX(WSL·macOS·Linux)와 브라우저 핸들(mdv:) 위치 (SDD 5.2)', () => {
+  assert.equal(pathStyle('/home/me/a.md'), 'posix');
+  assert.equal(pathStyle('mdv:/d1/a.md'), 'mdv');
+  assert.equal(pathStyle('docs/a.md'), null);
+  assert.equal(normalizePath('/home//me/./docs/../a.md'), '/home/me/a.md');
+  assert.equal(normalizePath('/../../etc'), '/etc', '루트 위로 올라가지 않는다');
+  assert.equal(docKey('/Home/A.md') === docKey('/home/a.md'), false, 'POSIX는 대소문자를 구분한다');
+  assert.equal(dirname('/a.md'), '/');
+  assert.equal(dirname('mdv:/d1/guide/a.md'), 'mdv:/d1/guide');
+  assert.equal(dirname('mdv:/f2/a.md'), 'mdv:/f2/');
+  assert.equal(normalizePath('mdv:/d1/guide/../../../x.md'), 'mdv:/d1/x.md', 'mdv 루트 위로 올라가지 않는다');
+  assert.equal(joinPath('mdv:/d1/', 'a.md'), 'mdv:/d1/a.md');
+  assert.equal(joinPath('/home/me', 'b'), '/home/me/b');
+  assert.equal(joinPath('C:\\', 'x.md'), 'C:\\x.md');
+  assert.equal(resolvePath('/home/me/repo/docs', '../img/a.png'), '/home/me/repo/img/a.png');
+  assert.equal(resolvePath('/home/me/repo/docs', '/img/a.png', '/home/me/repo'), '/home/me/repo/img/a.png', '/x는 루트 기준');
+  assert.equal(resolvePath('/home/me/repo/docs', '/img/a.png'), '/img/a.png', '루트를 모르면 파일 시스템 루트');
+  assert.equal(resolvePath('mdv:/d1/guide', '/img/a.png'), 'mdv:/d1/img/a.png');
+  assert.equal(resolveLocalUrl('C:/x.png', '/home/me'), null, '다른 형식의 위치는 열지 않는다');
+  assert.deepEqual(resolveLocalUrl('../b.md#x', 'mdv:/d3/sub'), { path: 'mdv:/d3/b.md', fragment: 'x' });
+  assert.ok(isInside('/home/me/repo/a.md', '/home/me/repo'));
+  assert.ok(!isInside('/home/me/repo2/a.md', '/home/me/repo'));
+  assert.ok(isInside('C:\\Docs\\A.md', 'c:\\docs'));
+  assert.ok(isInside('/etc/x', '/'));
+  assert.ok(isInside('mdv:/d1/a/b.md', 'mdv:/d1'));
+});
+
+test('루프백·자기 origin 주소 판별 (SDD 8.4)', () => {
+  for (const u of ['http://127.0.0.1:7787/api/stop', 'http://localhost/x', 'https://LOCALHOST.:8/', 'http://[::1]/', 'http://0.0.0.0/', 'http://2130706433/', 'http://127.1/', 'http://[::ffff:127.0.0.1]/', 'http://a.localhost/']) {
+    assert.ok(isInternalUrl(u), u);
+  }
+  assert.ok(isInternalUrl('http://192.168.0.5:7787/x', 'http://192.168.0.5:7787'), '자기 origin');
+  for (const u of ['https://example.com/a.png', 'mailto:me@x.y', 'img/a.png', 'http://128.0.0.1/']) assert.ok(!isInternalUrl(u), u);
 });
 
 test('단축키: 물리 키 기준이라 한글 입력 중에도 같다 (ARCH-05)', () => {
@@ -53,6 +94,22 @@ test('단축키: 물리 키 기준이라 한글 입력 중에도 같다 (ARCH-05
   assert.ok(prevented);
   reg.run('y');
   assert.equal(ran, 1, '비활성 명령은 실행되지 않는다');
+});
+
+test('메뉴 바: Alt+글자는 메뉴를 열고, Shift가 붙은 명령 키(Alt+Shift+T)는 명령에 넘긴다 (NFR-USE-01)', () => {
+  const cmds = new CommandRegistry();
+  let reopened = 0;
+  cmds.register({ id: 'file.reopenClosed', title: '닫은 탭 다시 열기', keys: ['Alt+Shift+T'], run: () => reopened++ });
+  const el = document.createElement('div');
+  document.body.append(el);
+  const bar = new MenuBar(el, cmds, [{ label: '설정', key: 'T', items: () => [] }]);
+  const key = (init: KeyboardEventInit) => new (dom.window as any).KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init }) as KeyboardEvent;
+  const combo = key({ key: 'T', code: 'KeyT', altKey: true, shiftKey: true });
+  assert.equal(bar.handleKeyDown(combo), false, '메뉴가 가로채지 않는다');
+  assert.equal(cmds.handleKey(combo), true);
+  assert.equal(reopened, 1);
+  assert.equal(bar.handleKeyDown(key({ key: 't', code: 'KeyT', altKey: true })), true, 'Alt+T는 설정 메뉴를 연다');
+  el.remove();
 });
 
 test('세션·설정: 잘못된 값은 기본값, 범위는 자른다 (ARCH-07)', () => {

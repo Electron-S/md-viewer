@@ -12,3 +12,6 @@ declare module '*.css' {
   const text: string;
   export default text;
 }
+
+/** 빌드 때 package.json의 version으로 바뀐다 */
+declare const __MDV_VERSION__: string;

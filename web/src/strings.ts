@@ -16,6 +16,7 @@ const ko = {
     emptyOpen: '파일 열기',
     emptyFolder: '폴더 열기',
     emptyRecent: '최근 파일',
+    emptyRestore: '이전 문서 다시 열기',
   },
 
   mode: { preview: '미리보기', source: '원문 보기', split: '분할 보기' },
@@ -31,7 +32,9 @@ const ko = {
     fileReveal: '탐색기에서 파일 위치 열기',
     filePrint: '인쇄…',
     fileClearRecent: '최근 목록 지우기',
-    appExit: '끝내기',
+    fileRestoreSession: '이전 문서 다시 열기',
+    rememberHandles: '연 파일·폴더 접근 권한 기억 (독립 모드)',
+    reserved: '다음 버전에서 지원할 기능',
     viewWordWrap: '자동 줄 바꿈 (원문 보기)',
     viewZoomIn: '확대',
     viewZoomOut: '축소',
@@ -72,16 +75,20 @@ const ko = {
   dialog: {
     ok: '확인',
     version: (v: string) => `버전 ${v}`,
-    webview2: (v: string) => `WebView2 런타임 ${v}`,
-    portable: '포터블 모드',
-    installed: '설치 모드',
-    dataDir: (dir: string) => `설정 위치: ${dir}`,
+    modeStandalone: '독립 모드: 브라우저에서 직접 연 뷰어',
+    modeLauncher: '실행기 모드: mdview 실행기가 띄운 뷰어',
+    storage: '설정·세션 위치: 이 브라우저의 저장소',
   },
+
+  picker: { documents: 'Markdown·텍스트 문서' },
 
   toast: {
     hostInitFailed: (msg: string) => `호스트 초기화 실패: ${msg}`,
     cannotOpen: (name: string, msg: string) => `열 수 없습니다: ${name} — ${msg}`,
     copied: '복사했습니다',
+    notInFolder: '고른 폴더에 이 문서가 없습니다. 문서가 든 폴더를 고르세요.',
+    restoreNone: '다시 열 수 있는 문서가 없습니다.',
+    notYet: '이 단축키의 기능은 다음 버전에서 지원합니다.',
   },
 
   preview: {
@@ -90,6 +97,14 @@ const ko = {
     renderLarge: '미리보기 그리기',
     docFailed: (msg: string) => `이 문서를 렌더링하지 못해 원문을 표시합니다: ${msg}`,
     blockFailed: (msg: string) => `이 블록을 렌더링하지 못해 원문을 표시합니다: ${msg}`,
+    needFolder: '이 문서의 상대 경로 이미지·링크를 보려면 문서가 든 폴더를 여세요.',
+    openFolder: '폴더 열기',
+  },
+
+  /** 실행기 모드에서 새 뷰어 탭이 열려 이 탭이 물러났을 때 (SDD 7.3) */
+  retired: {
+    title: 'MD Viewer (새 탭으로 옮겨짐)',
+    text: '이 뷰어의 문서는 새로 연 뷰어 탭으로 옮겨졌습니다. 이 탭은 닫아도 됩니다.',
   },
 
   toc: { label: '목차', empty: '제목이 없습니다', untitled: '(제목 없음)' },
@@ -127,6 +142,7 @@ const ko = {
     chars: (n: string) => `${n}자`,
     decodeWarning: '⚠ 읽지 못한 문자가 있음',
     deleted: '디스크에서 삭제됨',
+    offline: '⚠ 실행기 연결 끊김',
   },
 
   tab: {
@@ -137,9 +153,14 @@ const ko = {
   },
 
   error: {
-    host: '호스트 오류',
-    timeout: (method: string) => `${method} 응답이 없습니다`,
+    host: '파일을 읽지 못했습니다',
     noFile: '파일이 없습니다',
+    accessDenied: '접근 권한이 없습니다',
+    isFolder: '폴더입니다',
+    tooBig: '200 MB를 넘는 파일은 열 수 없습니다',
+    notSupported: '이 방식으로 연 파일에서는 할 수 없습니다. 파일을 다시 열어 주세요.',
+    badPath: '열 수 없는 위치입니다',
+    offline: '실행기에 연결할 수 없습니다. mdview로 다시 열어 주세요.',
     sourceModuleMissing: '원문 보기 모듈이 없습니다',
     sourceModuleLoad: '원문 보기 모듈을 불러오지 못했습니다',
     missingElement: (id: string) => `#${id} 없음`,
@@ -147,16 +168,12 @@ const ko = {
 
   /** 호스트 로그로 보내는 화면 오류 */
   log: {
-    appReadyFailed: (msg: string) => `app.ready 실패: ${msg}`,
     restoreFailed: (msg: string) => `세션 복원 실패: ${msg}`,
     reloadFailed: (path: string, msg: string) => `다시 읽기 실패: ${path} ${msg}`,
     renderFailed: (path: string, msg: string) => `렌더링 실패: ${path} ${msg}`,
     blockFailed: (path: string, line: number, msg: string) => `블록 렌더링 실패: ${path}:${line + 1} ${msg}`,
   },
 
-  /** 브라우저 모의 호스트(호스트 없이 화면만 띄울 때)의 예제 문서 */
-  mockDoc:
-    '# MD Viewer\n\n브라우저 모의 호스트로 실행 중입니다.\n\n## 목록\n\n- [x] 렌더링\n- [ ] 파일 열기\n\n```js\nconsole.log("hi")\n```\n',
 };
 
 export type Strings = typeof ko;

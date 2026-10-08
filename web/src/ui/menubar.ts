@@ -227,7 +227,8 @@ export class MenuBar {
       return true;
     }
     this.altAlone = false;
-    if (e.altKey && !e.ctrlKey && /^Key[A-Z]$/.test(e.code)) {
+    // Alt+글자만 메뉴를 연다. Shift 등이 붙은 조합(Alt+Shift+T 등)은 명령 단축키다.
+    if (e.altKey && !e.ctrlKey && !e.shiftKey && !e.metaKey && /^Key[A-Z]$/.test(e.code)) {
       const idx = this.menus.findIndex((m) => m.key === e.code.slice(3));
       if (idx >= 0) {
         e.preventDefault();
