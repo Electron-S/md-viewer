@@ -2,6 +2,7 @@
   "name": "md-viewer",
   "version": "1.0.0",
   "private": true,
+  "license": "MIT",
   "description": "Notepad++ 수준의 Markdown 뷰어 (WebView2 + C# 호스트)",
   "scripts": {
     "typecheck": "tsc --noEmit -p .",

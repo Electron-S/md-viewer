@@ -2,11 +2,14 @@
 
 Notepad++처럼 가볍게 뜨는 Windows용 Markdown 뷰어입니다. 탭으로 여러 문서를 열고, 미리보기·원문·분할 보기를 오가며 읽고, 목차와 작업 공간 트리로 이동합니다. 편집 기능은 v2.0에서 붙일 수 있게 구조를 잡아 두었습니다.
 
-- 요구사항: [SRS](https://claude.ai/code/artifact/de92e02f-5cc5-40f2-a3ca-80b6b2894cf1) · 설계: [SDD](https://claude.ai/code/artifact/80e2d190-46f7-4ac1-8d38-7a1954577b38) (원본은 Claude Docs, 요구사항 ID는 코드 주석과 테스트 이름에 그대로 쓴다)
+- 버전: v1.0.0 ([릴리스 노트](RELEASE_NOTES.md))
 - 실행 환경: Windows 10 22H2 / 11 x64, Microsoft Edge WebView2 런타임(Windows 11 기본 탑재)
-- 설치 크기: 약 2 MB (setup.exe 0.7 MB)
+- 설치 크기: 약 1.7 MB (setup.exe 0.6 MB)
+- 요구사항: [SRS](https://claude.ai/code/artifact/de92e02f-5cc5-40f2-a3ca-80b6b2894cf1) · 설계: [SDD](https://claude.ai/code/artifact/80e2d190-46f7-4ac1-8d38-7a1954577b38) (비공개 문서. 요구사항 ID는 코드 주석과 테스트 이름에 그대로 쓴다)
 
 ## 쓰기
+
+설치판과 포터블판은 [빌드](#빌드-wsl)하면 `dist/`에 만들어집니다.
 
 - 설치: `dist/MdViewer-<버전>-setup.exe` 실행. 관리자 권한 없이 `%LOCALAPPDATA%\Programs\MdViewer`에 설치하고, 시작 메뉴·연결 프로그램 목록·탐색기 우클릭 메뉴를 등록합니다. 제거는 Windows 설정의 앱 목록에서 합니다.
 - 포터블: `dist/MdViewer-<버전>-portable.zip`을 풀고 `mdview.exe` 실행. 설정은 같은 폴더의 `data\`에 저장됩니다.
@@ -28,12 +31,14 @@ UI 문자열은 `web/src/strings.ts`, `host/Strings.cs`, `setup/SetupStrings.cs`
 
 ## 빌드 (WSL)
 
+준비물은 WSL, Node.js 20 이상, Windows에 기본으로 있는 .NET Framework 4.8(`csc.exe`)입니다. WebView2 SDK는 처음 빌드할 때 NuGet에서 받아 `lib/`에 둡니다.
+
 ```bash
 npm ci
 ./tools/build.sh        # 화면 번들 → csc.exe로 호스트·테스트·setup 컴파일 → build/, dist/
-node tools/test-web.mjs # 화면 단위 테스트 (CommonMark 스펙 652개, XSS 등)
-./tools/test-host.sh    # 호스트 단위 테스트 (인코딩, 파일, 감시, 저장)
-./tools/e2e.sh          # 실제 앱 E2E (준비: tools/e2e.sh 머리말 참고)
+node tools/test-web.mjs # 화면 단위 테스트 33개 (CommonMark 스펙 652개, XSS, 문자열 분리 등)
+./tools/test-host.sh    # 호스트 단위 테스트 53개 (인코딩, 파일, 감시, 저장)
+./tools/e2e.sh          # 실제 앱 E2E 73개 (준비: tools/e2e.sh 머리말 참고)
 ```
 
 C# 소스는 UTF-8이고 `csc.exe`에 `-codepage:65001`을 넘깁니다. Windows 기본 코드 페이지(CP949)로 읽으면 한글 문자열이 깨집니다. E2E용 Python도 `PYTHONUTF8=1`로 실행하고 파일은 항상 `encoding='utf-8'`로 엽니다.
@@ -43,3 +48,10 @@ C# 소스는 UTF-8이고 `csc.exe`에 `-codepage:65001`을 넘깁니다. Windows
 - `MDVIEW_TRACE=1`: 시작 단계별 시각을 로그(`%LOCALAPPDATA%\MdViewer\logs\mdview.log`)에 남깁니다.
 - `MDVIEW_DEVTOOLS=1`: 개발자 도구를 켭니다.
 - `MDVIEW_PROFILE_DIR=<폴더>`: 설정·로그·WebView2 데이터를 한 폴더로 모읍니다(테스트 격리용).
+
+## 라이선스
+
+[MIT](LICENSE).
+
+- `tests/samples/commonmark-spec.json`은 [CommonMark Spec](https://spec.commonmark.org/0.31.2/)(John MacFarlane, [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/))의 예제를 뽑은 것이며, 이 파일에는 CC BY-SA 4.0이 적용됩니다.
+- 빌드한 앱에는 npm 의존성(markdown-it·CodeMirror MIT, markdown-it-task-lists ISC, highlight.js BSD-3-Clause, DOMPurify MPL-2.0 또는 Apache-2.0)과 WebView2 SDK가 들어갑니다. WebView2 SDK 라이선스는 `WebView2-LICENSE.txt`로 함께 배포합니다.
