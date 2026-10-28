@@ -6,8 +6,8 @@ import { transformSync } from 'esbuild';
 import { JSDOM } from 'jsdom';
 import { applyPageStrings, S } from '../src/strings';
 
-// NFR-USE-02 합격 기준 "코드 안 UI 문자열 0건": 한글 문자열은 화면·실행기의 문자열 표 두 곳에만 둔다.
-const TABLES = ['web/src/strings.ts', 'launcher/strings.ts'];
+// NFR-USE-02 합격 기준 "코드 안 UI 문자열 0건": 한글 문자열은 화면·실행기·Windows 앱의 문자열 표 세 곳에만 둔다.
+const TABLES = ['web/src/strings.ts', 'launcher/strings.ts', 'host/Strings.cs'];
 const HANGUL = /[\u1100-\u11FF\u3131-\u318E\uAC00-\uD7A3]+/g;
 
 function walk(dir: string): string[] {
@@ -22,6 +22,38 @@ function tsCode(src: string): string {
   return transformSync(src, { loader: 'ts', minifyWhitespace: true, legalComments: 'none', charset: 'utf8' }).code;
 }
 
+/** C#에서 주석을 뺀 코드. 문자열("…", @"…")과 글자('…') 리터럴은 그대로 둔다. */
+function csCode(src: string): string {
+  let out = '';
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i];
+    const n = src[i + 1];
+    if (c === '/' && n === '/') {
+      while (i < src.length && src[i] !== '\n') i++;
+    } else if (c === '/' && n === '*') {
+      const e = src.indexOf('*/', i + 2);
+      i = e < 0 ? src.length : e + 2;
+    } else if (c === '"' || c === "'" || (c === '@' && n === '"')) {
+      const verbatim = c === '@';
+      const quote = verbatim ? '"' : c;
+      let j = i + (verbatim ? 2 : 1);
+      while (j < src.length) {
+        if (!verbatim && src[j] === '\\') j += 2;
+        else if (src[j] === quote && verbatim && src[j + 1] === quote) j += 2;
+        else if (src[j] === quote) break;
+        else j++;
+      }
+      out += src.slice(i, j + 1);
+      i = j + 1;
+    } else {
+      out += c;
+      i++;
+    }
+  }
+  return out;
+}
+
 function htmlText(src: string): string {
   return src.replace(/<!--[\s\S]*?-->/g, '');
 }
@@ -29,6 +61,7 @@ function htmlText(src: string): string {
 function codeOf(file: string): string {
   const src = readFileSync(file, 'utf8');
   if (file.endsWith('.ts')) return tsCode(src);
+  if (file.endsWith('.cs')) return csCode(src);
   return htmlText(src);
 }
 
@@ -42,6 +75,7 @@ test('UI 문자열은 문자열 표에만 있다 (NFR-USE-02)', () => {
     ...walk('web/src').filter((f) => f.endsWith('.ts')),
     'web/static/index.html',
     ...walk('launcher').filter((f) => f.endsWith('.ts') && !f.startsWith('launcher/test/')),
+    ...walk('host').filter((f) => f.endsWith('.cs')),
   ];
   for (const t of TABLES) assert.ok(files.includes(t), `${t} 이 없습니다`);
   const found = files.filter((f) => !TABLES.includes(f)).flatMap(hangulIn);

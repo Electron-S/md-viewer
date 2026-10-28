@@ -34,7 +34,8 @@ export interface HostDoc {
   binary: boolean;
 }
 
-export type BridgeMode = 'standalone' | 'launcher';
+/** standalone: 브라우저에서 직접 연 viewer.html, launcher: 실행기(mdview)가 띄운 뷰어, desktop: Windows 앱(MDViewer.exe) 안의 뷰어 */
+export type BridgeMode = 'standalone' | 'launcher' | 'desktop';
 
 export interface ReadyInfo {
   mode: BridgeMode;
@@ -47,14 +48,19 @@ export interface ReadyInfo {
   roots: string[];
   /** 독립 모드에서 권한을 다시 받아야 하는 저장된 루트 수 */
   restorable: number;
+  /** 설정·세션을 두는 폴더 (Windows 앱) */
+  dataDir?: string;
+  /** 탐색기의 연결 프로그램 목록에 등록했는지 (Windows 앱) */
+  registered?: boolean;
 }
 
 export interface Capabilities {
-  /** 탐색기에서 파일 위치 열기 (실행기 모드) */
+  /** 탐색기에서 파일 위치 열기 (실행기 모드, Windows 앱) */
   reveal: boolean;
 }
 
-export type BridgeEvent = 'file.changed' | 'file.deleted' | 'bridge.offline' | 'bridge.online';
+/** open.paths: Windows 앱을 다시 실행해 넘긴 위치, app.closing: Windows 앱 창을 닫기 직전 (저장할 기회) */
+export type BridgeEvent = 'file.changed' | 'file.deleted' | 'bridge.offline' | 'bridge.online' | 'open.paths' | 'app.closing';
 type Listener = (payload: any) => void;
 
 export interface Bridge {

@@ -1,10 +1,13 @@
 # MD Viewer E2E 테스트 (SDD 9.3). Windows Python + Playwright로 Edge를 조종한다.
 #   실행기 모드: WSL에서 띄운 실행기(--no-open)가 낸 주소를 Edge로 연다. 문서는 WSL 디스크에 두고 \\wsl.localhost로 고친다.
 #   독립 모드: Windows 디스크의 viewer.html을 file://로 열고, 끌어다 놓기(CDP)·파일 입력으로 문서를 연다.
-#   python e2e.py --distro <WSL 배포판> --node <WSL의 node> --work <WSL 작업 폴더> --viewer <viewer.html> --out <결과 폴더> [--headed]
+#   Windows 앱: MDViewer.exe를 원격 디버깅 포트(WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS)로 띄워 그 WebView2에 CDP로 붙는다.
+#   python e2e.py --distro <WSL 배포판> --node <WSL의 node> --work <WSL 작업 폴더> --viewer <viewer.html> --exe <MDViewer.exe> --out <결과 폴더> [--headed]
 # CP949 문제를 피하려고 파일은 바이트나 encoding='utf-8'로만 읽고 쓰며, 표준 출력과 하위 프로세스 출력도 UTF-8로 다룬다.
 import argparse
 import base64
+import ctypes
+import ctypes.wintypes as wt
 import faulthandler
 import http.client
 import json
@@ -18,6 +21,8 @@ import sys
 import tempfile
 import time
 import traceback
+import uuid
+import winreg
 from urllib.parse import parse_qs, quote, urlparse
 
 from playwright.sync_api import sync_playwright
@@ -31,8 +36,10 @@ ap.add_argument('--distro', required=True)
 ap.add_argument('--node', required=True)
 ap.add_argument('--work', required=True, help='WSL 쪽 작업 폴더(POSIX 경로)')
 ap.add_argument('--viewer', required=True, help='독립 모드로 열 viewer.html(Windows 경로)')
+ap.add_argument('--exe', required=True, help='Windows 앱 MDViewer.exe(Windows 경로)')
 ap.add_argument('--out', required=True)
 ap.add_argument('--headed', action='store_true')
+ap.add_argument('--only', choices=['desktop'], help='이 시나리오만 돌린다(디버깅용)')
 ARGS = ap.parse_args()
 
 DISTRO = ARGS.distro
@@ -41,6 +48,7 @@ WORK_P = ARGS.work.rstrip('/')
 WORK = pathlib.Path('\\\\wsl.localhost\\' + DISTRO + WORK_P.replace('/', '\\'))
 MJS = WORK_P + '/app/mdview.mjs'
 VIEWER = pathlib.Path(ARGS.viewer)
+EXE = pathlib.Path(ARGS.exe)
 OUT = pathlib.Path(ARGS.out)
 OUT.mkdir(parents=True, exist_ok=True)
 HEADLESS = not ARGS.headed
@@ -1103,6 +1111,312 @@ def run_memory(pw, ctx):
 
 # ---------------------------------------------------------------- 독립 모드 (file://)
 
+# ---------------------------------------------------------------- Windows 앱 (MDViewer.exe)
+
+user32 = ctypes.windll.user32
+APP_PORT = 9333
+WM_SYSCOMMAND = 0x0112
+SC_CLOSE = 0xF060
+
+
+def app_window(pid):
+    """그 프로세스의 보이는 최상위 창"""
+    found = []
+
+    @ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
+    def cb(hwnd, _):
+        p = wt.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(p))
+        if p.value == pid and user32.IsWindowVisible(hwnd):
+            found.append(hwnd)
+        return True
+
+    user32.EnumWindows(cb, 0)
+    return found[0] if found else None
+
+
+class App:
+    """MDViewer.exe 하나. 프로필(설정·세션·WebView2)과 레지스트리 등록 위치를 시험용으로 따로 둔다."""
+
+    def __init__(self, pw, args, profile, regroot):
+        self.env = dict(os.environ, MDVIEW_PROFILE_DIR=str(profile), MDVIEW_REGROOT=regroot,
+                        WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=f'--remote-debugging-port={APP_PORT}')
+        self.t0 = time.time()
+        self.proc = subprocess.Popen([str(EXE), *map(str, args)], env=self.env)
+        self.browser = None
+        for _ in range(150):
+            try:
+                self.browser = pw.chromium.connect_over_cdp(f'http://127.0.0.1:{APP_PORT}')
+                break
+            except Exception:
+                time.sleep(0.1)
+        if not self.browser:
+            raise RuntimeError('CDP 연결 실패')
+        # sync API는 time.sleep 동안 이벤트를 처리하지 않으므로 Playwright 대기로 이벤트를 돌린다.
+        page = None
+        deadline = time.time() + 20
+        while time.time() < deadline and not page:
+            pages = [pg for c in self.browser.contexts for pg in c.pages]
+            hit = [pg for pg in pages if 'app.mdview' in pg.url]
+            if hit:
+                page = hit[0]
+            elif pages:
+                pages[0].wait_for_timeout(100)
+            elif self.browser.contexts:
+                try:
+                    self.browser.contexts[0].wait_for_event('page', timeout=500)
+                except Exception:
+                    pass
+            else:
+                time.sleep(0.1)
+        if not page:
+            raise RuntimeError('앱 페이지를 찾지 못함')
+        self.v = Viewer(page)
+        page.wait_for_selector('body[data-ready="1"]', timeout=20000)
+
+    def run(self, *args):
+        """같은 프로필로 EXE를 한 번 더 실행한다(첫 인스턴스에 넘기고 바로 끝나야 한다)."""
+        return subprocess.run([str(EXE), *map(str, args)], env=self.env, timeout=30).returncode
+
+    def close(self, timeout=10):
+        """사용자가 닫기 단추를 누른 것처럼(SC_CLOSE) 끝낸다. 닫기 전에 화면이 세션을 저장한다."""
+        hwnd = app_window(self.proc.pid)
+        if hwnd:
+            user32.PostMessageW(hwnd, WM_SYSCOMMAND, SC_CLOSE, 0)
+        try:
+            return self.proc.wait(timeout)
+        except subprocess.TimeoutExpired:
+            return None
+        finally:
+            try:
+                self.browser.close()
+            except Exception:
+                pass
+
+    def kill(self):
+        if self.proc.poll() is None:
+            self.proc.kill()
+
+
+def reg_exists(root, sub):
+    try:
+        winreg.CloseKey(winreg.OpenKey(winreg.HKEY_CURRENT_USER, root + '\\' + sub))
+        return True
+    except OSError:
+        return False
+
+
+def reg_delete_tree(root):
+    try:
+        k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, root, 0, winreg.KEY_ALL_ACCESS)
+    except OSError:
+        return
+    while True:
+        try:
+            name = winreg.EnumKey(k, 0)
+        except OSError:
+            break
+        reg_delete_tree(root + '\\' + name)
+    winreg.CloseKey(k)
+    winreg.DeleteKey(winreg.HKEY_CURRENT_USER, root)
+
+
+def run_desktop(pw):
+    docs = LOCAL / '앱 문서'
+    (docs / 'img').mkdir(parents=True, exist_ok=True)
+    (docs / 'img' / 'dot.png').write_bytes(PNG_1PX)
+    body = '\n\n![점](img/dot.png)\n\n[셋째로](셋째.md)\n\n' + '\n\n'.join(f'## 절 {i}\n\n' + '앱 본문 문장입니다. ' * 30 for i in range(30)) + '\n'
+    write(docs / '첫 문서.md', '# 앱 첫 문서' + body)
+    write(docs / '둘째.md', '# 둘째 문서\n')
+    write(docs / '셋째.md', '# 셋째 문서\n')
+    write(docs / '끌어 놓기.md', '# 끌어 놓은 문서\n')
+    write(docs / '완성형.md', '# 완성형 문서\n\n똠방각하\n', encoding='cp949')
+    write(docs / '작업 폴더' / '하나.md', '# 하나\n')
+    write(docs / '작업 폴더' / '메모.txt', '메모\n')
+    shutil.copy(DOCS / 'one-mb.md', docs / 'one-mb.md')
+    if not (DOCS / 'xss.md').exists():
+        write_xss(17787)
+    shutil.copy(DOCS / 'xss.md', docs / 'xss.md')
+    profile = LOCAL / 'app-profile'
+    regroot = 'Software\\MdViewer-e2e-' + uuid.uuid4().hex
+    first = str(docs / '첫 문서.md')
+    app = App(pw, [first], profile, regroot)
+    cur = [app]
+    startup = {}
+    try:
+        def t_start():
+            v = cur[0].v
+            v.wait('() => __mdv.preview.article.querySelector("img")?.naturalWidth > 0', 5000)
+            v.wait('() => window.__mdvReadyAt !== undefined', 10000)
+            st = v.ev('''() => ({ mode: __mdv.bridge.mode, title: document.title, tabs: __mdv.tabs.tabs.map(t => t.path),
+                readyEpoch: performance.timeOrigin + window.__mdvReadyAt })''')
+            check('FR-FILE-01', 'Windows 앱: 시작 인자로 연 문서를 그린다(한글 경로, 상대 경로 그림)',
+                  st['mode'] == 'desktop' and st['tabs'] == [first] and v.h1() == '앱 첫 문서' and st['title'] == '첫 문서.md - MD Viewer', st)
+            # 처음 실행(새 프로필·새 EXE)은 WebView2 프로필을 만들고 백신이 새 EXE를 검사해 더 걸린다. 판정은 다시 실행할 때 한다.
+            startup['first'] = st['readyEpoch'] / 1000 - cur[0].t0
+            shot(v, '20-desktop')
+        guard('FR-FILE-01', 'Windows 앱 시작', t_start)
+
+        def t_second_instance():
+            v = cur[0].v
+            t0 = time.time()
+            code = cur[0].run(docs / '둘째.md')
+            v.wait('(p) => __mdv.tabs.active()?.path === p', 5000, arg=str(docs / '둘째.md'))
+            dt = time.time() - t0
+            check('FR-FILE-04', 'Windows 앱: 다시 실행하면 첫 창의 새 탭으로 열고 바로 끝난다',
+                  code == 0 and len(v.state()['tabs']) == 2 and v.h1() == '둘째 문서' and cur[0].proc.poll() is None, f'종료 코드 {code}, {dt:.2f}s')
+        guard('FR-FILE-04', 'Windows 앱 두 번째 실행', t_second_instance)
+
+        def t_link():
+            v = cur[0].v
+            v.open_file(first)
+            v.ev('''() => [...__mdv.preview.root.querySelectorAll('a')].find(a => a.textContent === '셋째로').click()''')
+            v.wait('() => __mdv.tabs.active()?.path.endsWith("셋째.md")', 5000)
+            check('FR-NAV-03', 'Windows 앱: 문서 안 상대 링크를 새 탭으로 연다', v.h1() == '셋째 문서', v.state()['active'])
+        guard('FR-NAV-03', 'Windows 앱 링크', t_link)
+
+        def t_watch():
+            v = cur[0].v
+            v.open_file(first)
+            v.ev('() => { __mdv.preview.el.scrollTop = 900; }')
+            v.page.wait_for_timeout(300)
+            line0 = v.ev('() => __mdv.tabs.active().line')
+            lat = []
+            for i in range(10):
+                t0 = time.time()
+                write(docs / '첫 문서.md', f'# 앱 저장 {i}' + body)
+                v.wait('(m) => __mdv.preview.article.querySelector("h1")?.textContent === m', 3000, arg=f'앱 저장 {i}')
+                lat.append((time.time() - t0) * 1000)
+                v.page.wait_for_timeout(150)
+            med = statistics.median(lat)
+            line1 = settled(lambda: v.ev('() => __mdv.tabs.active().line'))
+            check('FR-WATCH-01', 'Windows 앱: 밖에서 저장하면 다시 그리고 스크롤 줄을 지킨다', abs(line1 - line0) < 1.5, f'줄 {line0:.1f}→{line1:.1f}')
+            check('NFR-PERF-04', 'Windows 앱: 저장부터 화면 반영 0.5초 이내(10회 중앙값)', med < 500, f'{med:.0f} ms (max {max(lat):.0f})')
+            backup = (docs / '첫 문서.md').read_bytes()
+            (docs / '첫 문서.md').unlink()
+            v.wait('() => __mdv.activeDoc()?.state === "deleted"', 3000)
+            (docs / '첫 문서.md').write_bytes(backup)
+            v.wait('() => __mdv.activeDoc()?.state === "ok"', 3000)
+            check('FR-WATCH-02', 'Windows 앱: 삭제 표시와 복구', True)
+        guard('FR-WATCH-01', 'Windows 앱 파일 감시', t_watch)
+
+        def t_folder():
+            v = cur[0].v
+            cur[0].run(docs / '작업 폴더')
+            v.wait('() => document.querySelectorAll(".ws-item").length >= 2', 5000)
+            items = v.page.locator('.ws-item').all_inner_texts()
+            check('FR-NAV-02', 'Windows 앱: 폴더를 넘기면 작업 공간 트리로 연다', items == ['메모.txt', '하나.md'], items)
+        guard('FR-NAV-02', 'Windows 앱 작업 공간', t_folder)
+
+        def t_encoding():
+            v = cur[0].v
+            v.open_file(str(docs / '완성형.md'))
+            text = v.ev('() => __mdv.preview.article.textContent')
+            enc = v.ev('() => __mdv.activeDoc().encoding')
+            check('NFR-ENC-01', 'Windows 앱: CP949 문서를 판별해 읽는다', v.h1() == '완성형 문서' and '똠방각하' in text and enc == 'cp949', f'{enc} {text[:30]}')
+        guard('NFR-ENC-01', 'Windows 앱 인코딩', t_encoding)
+
+        def t_drop():
+            v = cur[0].v
+            cdp_drop(v, [docs / '끌어 놓기.md'])
+            v.wait('(p) => __mdv.tabs.active()?.path === p', 8000, arg=str(docs / '끌어 놓기.md'))
+            check('FR-FILE-01', 'Windows 앱: 끌어다 놓은 파일을 OS 경로로 연다', v.h1() == '끌어 놓은 문서', v.state()['active'])
+        guard('FR-FILE-01', 'Windows 앱 끌어다 놓기', t_drop)
+
+        def t_shell_guards():
+            v = cur[0].v
+            r = v.ev('''async (p) => {
+                const code = async (m, a) => { try { await __mdv.bridge.request(m, a); return 'OK'; } catch (e) { return e.code; } };
+                return { js: await code('shell.openExternal', { url: 'javascript:alert(1)' }), file: await code('shell.openExternal', { url: 'file:///C:/Windows/notepad.exe' }),
+                         reveal: await code('shell.reveal', { path: p }), store: await code('store.save', { name: '../x', data: '' }), unknown: await code('app.nope', {}) };
+            }''', str(docs / '없는 폴더' / 'a.md'))
+            check('NFR-SEC-03', 'Windows 앱: 외부 주소는 http·https·mailto만, 없는 위치는 탐색기를 열지 않고, 모르는 메서드는 거부',
+                  r == {'js': 'EINVAL', 'file': 'EINVAL', 'reveal': 'ENOENT', 'store': 'EINVAL', 'unknown': 'ENOMETHOD'}, r)
+            bad = v.ev('''async () => { const r = await fetch('/api/read?path=' + encodeURIComponent('상대.md')); return [r.status, (await r.json()).code]; }''')
+            check('NFR-SEC-03', 'Windows 앱: 상대 경로 읽기는 거부한다', bad == [400, 'EINVAL'], bad)
+        guard('NFR-SEC-03', 'Windows 앱 OS 연동 거부', t_shell_guards)
+
+        def t_register():
+            v = cur[0].v
+            v.ev("() => __mdv.cmds.run('app.openWith')")
+            v.wait('() => __mdv.info.registered === true', 5000)
+            on = reg_exists(regroot, 'Classes\\.md\\OpenWithProgids') and reg_exists(regroot, 'Classes\\Applications\\MDViewer.exe\\shell\\open\\command')
+            v.ev("() => __mdv.cmds.run('app.openWith')")
+            v.wait('() => __mdv.info.registered === false', 5000)
+            off = not reg_exists(regroot, 'Classes\\Applications\\MDViewer.exe')
+            check('FR-FILE-01', 'Windows 앱: 설정 메뉴로 탐색기 연결 프로그램 목록에 등록·해제(사용자 단위)', on and off, f'등록 {on}, 해제 {off}')
+        guard('FR-FILE-01', 'Windows 앱 연결 프로그램', t_register)
+
+        def t_xss():
+            v = cur[0].v
+            v.open_file(str(docs / 'xss.md'))
+            v.page.wait_for_timeout(800)
+            r = v.ev('''() => {
+                const root = __mdv.preview.article;
+                const bad = [...root.querySelectorAll('*')].filter(el => [...el.attributes].some(at => /^on/i.test(at.name) || at.name === 'style' || at.name === 'srcset' || /^\\s*javascript:/i.test(at.value)));
+                return { xss: window.__xss ?? null, bad: bad.length, banned: root.querySelectorAll('iframe,script,style,video,form,button').length };
+            }''')
+            check('NFR-SEC-01', 'Windows 앱: XSS 페이로드 문서에서 실행 0건', r == {'xss': None, 'bad': 0, 'banned': 0} and not v.dialogs, f'{r} {v.dialogs}')
+        guard('NFR-SEC-01', 'Windows 앱 XSS', t_xss)
+
+        def t_perf():
+            v = cur[0].v
+            p = str(docs / 'one-mb.md')
+            renders = [v.ev('''async (p) => {
+                const ex = __mdv.tabs.tabs.find(t => t.path === p);
+                if (ex) __mdv.closeTab(ex.id);
+                const t0 = performance.now();
+                await __mdv.openFile(p);
+                await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+                return performance.now() - t0;
+            }''', p) for _ in range(10)]
+            med = statistics.median(renders)
+            check('NFR-PERF-02', 'Windows 앱: 1 MB 문서 열기+미리보기 렌더링 1초 이내(10회 중앙값)', med < 1000, f'{med:.0f} ms (min {min(renders):.0f}, max {max(renders):.0f})')
+        guard('NFR-PERF-02', 'Windows 앱 1 MB', t_perf)
+
+        def t_theme():
+            v = cur[0].v
+            v.ev("() => __mdv.cmds.run('view.theme.dark')")
+            v.page.wait_for_timeout(200)
+            dark = v.ev('() => document.documentElement.dataset.theme')
+            v.ev("() => __mdv.cmds.run('view.theme.system')")
+            v.page.wait_for_timeout(200)
+            check('FR-VIEW-04', 'Windows 앱: 테마를 바꾸면 화면과 제목 표시줄에 알린다(오류 없음)', dark == 'dark' and not v.errors, v.errors)
+        guard('FR-VIEW-04', 'Windows 앱 테마', t_theme)
+
+        def t_close_restore():
+            v = cur[0].v
+            v.open_file(first)
+            v.ev('() => { __mdv.preview.el.scrollTop = 1500; }')
+            v.page.wait_for_timeout(400)
+            before = v.state()
+            line = next(t['line'] for t in before['tabs'] if t['path'] == first)
+            check('NFR-REL-01', 'Windows 앱: 화면 스크립트 오류 없음', not v.errors, v.errors)
+            code = cur[0].close()
+            saved = json.loads((profile / 'session.json').read_text(encoding='utf-8'))
+            check('FR-SESS-01', 'Windows 앱: 창을 닫으면 마지막 상태를 저장하고 끝난다',
+                  code == 0 and [t['path'] for t in saved['tabs']] == [t['path'] for t in before['tabs']], f'종료 코드 {code}, 저장 {[(pathlib.Path(t["path"]).name, round(t["line"], 1)) for t in saved["tabs"]]} 활성 {saved.get("activeIndex")}, 닫기 전 {[(pathlib.Path(t["path"]).name, round(t["line"], 1)) for t in before["tabs"]]}')
+            cur[0] = App(pw, [], profile, regroot)
+            v = cur[0].v
+            v.wait('() => window.__mdvReadyAt !== undefined', 10000)  # 첫 탭을 그린 다음 프레임에 적힌다
+            dt = v.ev('() => performance.timeOrigin + window.__mdvReadyAt') / 1000 - cur[0].t0
+            check('NFR-PERF-01', 'Windows 앱: 다시 실행 → 첫 탭 렌더링 2초 이내(원격 디버깅 켬)', dt <= 2.0,
+                  f'{dt * 1000:.0f} ms (처음 실행 {startup.get("first", 0) * 1000:.0f} ms)')
+            v.page.wait_for_selector('body[data-restored="1"]', timeout=20000)
+            after = v.state()
+            got = settled(lambda: v.ev('() => __mdv.tabs.active().line'))
+            check('FR-SESS-01', 'Windows 앱: 다시 실행하면 탭·활성 탭·줄을 복원한다',
+                  [t['path'] for t in after['tabs']] == [t['path'] for t in before['tabs']] and after['active'] == first and abs(got - line) < 1.0,
+                  f'탭 {len(after["tabs"])}개, 줄 {line:.1f}→{got:.1f}')
+        guard('FR-SESS-01', 'Windows 앱 세션', t_close_restore)
+    finally:
+        cur[0].close(5)
+        cur[0].kill()
+        reg_delete_tree(regroot)
+    log = '\n'.join(f.read_text(encoding='utf-8', errors='replace') for f in sorted((profile / 'logs').glob('*.log')))
+    check('NFR-REL-03', 'Windows 앱 로그는 UTF-8이고 오류가 없다', '[error]' not in log, log[-400:])
+
+
 def run_standalone(pw):
     ctx = launch(pw, 'profile-standalone')
     try:
@@ -1216,6 +1530,16 @@ def main():
     shutil.copy(VIEWER, LOCAL / 'viewer.html')
     VIEWER = LOCAL / 'viewer.html'
     main_launcher = Launcher('home', 17787)
+    if ARGS.only == 'desktop':
+        try:
+            with sync_playwright() as pw:
+                guard('FR-FILE-01', 'Windows 앱', lambda: run_desktop(pw))
+        finally:
+            shutil.rmtree(LOCAL, ignore_errors=True)
+        passed = sum(r['ok'] for r in RESULTS)
+        print(f'# pass {passed}')
+        print(f'# fail {len(RESULTS) - passed}')
+        sys.exit(0 if passed == len(RESULTS) else 1)
     try:
         with sync_playwright() as pw:
             ctx = launch(pw, 'profile')
@@ -1230,6 +1554,7 @@ def main():
             finally:
                 ctx.close()
             guard('NFR-PORT-01', '독립 모드', lambda: run_standalone(pw))
+            guard('FR-FILE-01', 'Windows 앱', lambda: run_desktop(pw))
         log = main_launcher.logs()
         check('NFR-REL-03', '실행기 로그는 UTF-8이고 예상치 못한 오류가 없다', '[error]' not in log and '실행기 시작' in log, log[-400:])
     finally:

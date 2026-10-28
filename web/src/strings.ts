@@ -34,6 +34,7 @@ const ko = {
     fileClearRecent: '최근 목록 지우기',
     fileRestoreSession: '이전 문서 다시 열기',
     rememberHandles: '연 파일·폴더 접근 권한 기억 (독립 모드)',
+    openWith: '탐색기 연결 프로그램 목록에 MD Viewer 등록',
     reserved: '다음 버전에서 지원할 기능',
     viewWordWrap: '자동 줄 바꿈 (원문 보기)',
     viewZoomIn: '확대',
@@ -77,7 +78,9 @@ const ko = {
     version: (v: string) => `버전 ${v}`,
     modeStandalone: '독립 모드: 브라우저에서 직접 연 뷰어',
     modeLauncher: '실행기 모드: mdview 실행기가 띄운 뷰어',
+    modeDesktop: 'Windows 앱: MDViewer.exe',
     storage: '설정·세션 위치: 이 브라우저의 저장소',
+    storageDesktop: (dir: string) => `설정·세션 위치: ${dir}`,
   },
 
   picker: { documents: 'Markdown·텍스트 문서' },
@@ -90,6 +93,8 @@ const ko = {
     restoreNone: '다시 열 수 있는 문서가 없습니다.',
     notYet: '이 단축키의 기능은 다음 버전에서 지원합니다.',
     notViewable: (name: string) => `문서가 아닌 파일은 뷰어에서 열지 않습니다: ${name}`,
+    openWithOn: '등록했습니다. 탐색기에서 .md 파일을 오른쪽 클릭 → 연결 프로그램에서 MD Viewer를 고르세요.',
+    openWithOff: '연결 프로그램 목록에서 뺐습니다.',
   },
 
   preview: {

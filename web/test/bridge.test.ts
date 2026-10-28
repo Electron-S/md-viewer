@@ -1,6 +1,7 @@
 import { dom } from './dom';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { HostBridge } from '../src/bridge/host';
 import { LocalBridge } from '../src/bridge/local';
 import { ServerBridge } from '../src/bridge/server';
 import { HostError } from '../src/bridge/types';
@@ -461,4 +462,97 @@ test('파일 핸들 브리지: 핸들 없는 파일은 고른 폴더에서 이�
   assert.ok(!b.isRestorable(mem.path), '핸들 없는 파일은 다시 열 수 없다');
   await b.request('handles.remember', { on: false });
   assert.ok(!b.isRestorable(`${dir.path}sub/x.md`), '기억하지 않기로 하면 세션에 남기지 않는다');
+});
+
+/** WebView2의 chrome.webview 흉내. 보낸 메시지를 모으고, 호스트처럼 답·이벤트를 보낸다. */
+class FakeWebView {
+  sent: { msg: any; extra?: unknown[] }[] = [];
+  private fn: ((ev: { data: any }) => void) | null = null;
+  postMessage(msg: unknown) {
+    this.sent.push({ msg });
+  }
+  postMessageWithAdditionalObjects(msg: unknown, extra: unknown) {
+    this.sent.push({ msg, extra: extra as unknown[] });
+  }
+  addEventListener(_type: 'message', fn: (ev: { data: any }) => void) {
+    this.fn = fn;
+  }
+  /** 마지막 요청에 답한다. */
+  reply(r: unknown, ok = true) {
+    const id = this.sent.at(-1)!.msg.id;
+    this.fn?.({ data: ok ? { t: 'res', id, ok: true, r } : { t: 'res', id, ok: false, e: r } });
+  }
+  emit(n: string, p: unknown) {
+    this.fn?.({ data: { t: 'evt', n, p } });
+  }
+}
+
+test('Windows 앱 브리지: 시작 정보는 index.html에서, 문서 바이트는 같은 origin 주소로 받아 첫 화면까지 메시지를 쓰지 않는다', async () => {
+  const doc = dom.window.document;
+  const boot = doc.createElement('script');
+  boot.type = 'application/json';
+  boot.id = 'mdv-boot';
+  boot.textContent = JSON.stringify({
+    args: [{ path: 'C:\\docs\\a.md', isDir: false }], settings: '{"theme":"dark"}', session: null, version: '1.1.0',
+    dataDir: 'C:\\Users\\me\\AppData\\Roaming\\MdViewer', registered: true,
+  });
+  doc.head.append(boot);
+  const calls = mockFetch({
+    '/api/read': (c) =>
+      new URL(c.url, 'http://x').searchParams.get('path') === 'C:\\docs\\없음.md'
+        ? Response.json({ code: 'ENOENT', message: '없음' }, { status: 404 })
+        : new Response(enc('# 앱\n'), { headers: { 'x-mdv-mtime': '7' } }),
+  });
+  let touched = 0;
+  const b = new HostBridge(() => {
+    touched++;
+    return new FakeWebView();
+  });
+  const ready = await b.request('app.ready');
+  assert.deepEqual(
+    [ready.mode, ready.version, ready.registered, ready.dataDir, ready.args],
+    ['desktop', '1.1.0', true, 'C:\\Users\\me\\AppData\\Roaming\\MdViewer', [{ path: 'C:\\docs\\a.md', isDir: false }]],
+  );
+  assert.equal(doc.getElementById('mdv-boot'), null, '한 번 쓰면 지운다');
+  const d = await b.request('file.read', { path: 'c:/docs/a.md' });
+  assert.deepEqual([d.path, d.text, d.mtime], ['C:\\docs\\a.md', '# 앱\n', 7]);
+  assert.equal(new URL(calls[0].url, 'http://x').searchParams.get('path'), 'C:\\docs\\a.md');
+  await assert.rejects(b.request('file.read', { path: 'C:\\docs\\없음.md' }), (e: HostError) => e.code === 'ENOENT');
+  assert.equal(touched, 0, '첫 화면까지는 chrome.webview를 건드리지 않는다');
+  assert.equal(b.imageUrl('C:\\docs\\a b.png'), '/api/file?path=C%3A%5Cdocs%5Ca%20b.png');
+  assert.deepEqual([b.rootOf(), b.canResolveRelative(), b.isRestorable(), b.isPending()], [null, true, true, false]);
+});
+
+test('Windows 앱 브리지: OS 일은 메시지로 묻고, 호스트 이벤트(다시 실행해 넘긴 위치·파일 변경)를 받는다', async () => {
+  const wv = new FakeWebView();
+  const b = new HostBridge(() => wv);
+  const seen: unknown[] = [];
+  b.on('open.paths', (p) => seen.push(p));
+  b.on('file.changed', (p) => seen.push(p));
+  b.connect();
+  b.connect();
+  assert.deepEqual(wv.sent.map((s) => s.msg.m), ['app.attach'], '붙었다는 알림은 한 번만');
+  wv.reply({ paths: [{ path: 'C:\\early.md', isDir: false }] });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(seen, [{ paths: [{ path: 'C:\\early.md', isDir: false }] }], '붙기 전에 넘긴 위치도 연다');
+  seen.length = 0;
+  const list = b.request('dir.list', { path: 'C:\\docs' });
+  assert.deepEqual(wv.sent[1].msg, { t: 'req', id: 2, m: 'dir.list', p: { path: 'C:\\docs' } });
+  wv.reply({ entries: [{ name: 'z.md', isDir: false }, { name: '.git', isDir: true }, { name: 'img', isDir: true }] });
+  assert.deepEqual((await list).entries, [{ name: 'img', isDir: true }, { name: 'z.md', isDir: false }]);
+  const reveal = b.request('shell.reveal', { path: 'C:\\docs\\a.md' });
+  wv.reply({ code: 'ENOENT', msg: '없음' }, false);
+  await assert.rejects(reveal, (e: HostError) => e.code === 'ENOENT');
+  wv.emit('open.paths', { paths: [{ path: 'C:\\b.md', isDir: false }] });
+  wv.emit('file.changed', { path: 'C:\\docs\\a.md' });
+  assert.deepEqual(seen, [{ paths: [{ path: 'C:\\b.md', isDir: false }] }, { path: 'C:\\docs\\a.md' }]);
+  // 끌어다 놓은 파일은 File 객체를 함께 넘기고, 경로는 호스트가 알려 준다.
+  const file = new dom.window.File(['x'], 'a.md');
+  const drop = b.takeDrop({ files: [file] } as unknown as DataTransfer);
+  assert.equal(wv.sent.at(-1)!.msg.m, 'drop.paths');
+  assert.equal(wv.sent.at(-1)!.extra![0], file);
+  wv.reply({ entries: [{ path: 'C:\\docs\\a.md', isDir: false }] });
+  assert.deepEqual(await drop, [{ path: 'C:\\docs\\a.md', isDir: false }]);
+  assert.deepEqual(await b.takeDrop({ files: [] } as unknown as DataTransfer), []);
+  assert.deepEqual(await b.request('session.restore'), { restored: 0, remaining: 0 }, '파일 핸들 일은 하지 않는다');
 });

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # E2E (SDD 9.3): WSL에서 띄운 실행기와 Windows Edge를 Windows Python + Playwright로 조종한다.
+# Windows 앱(dist/MDViewer.exe)은 원격 디버깅 포트로 띄워 그 WebView2에 붙는다. --only desktop을 주면 Windows 앱만 돈다.
 # 준비(한 번, Windows): python -m venv %LOCALAPPDATA%\MdViewer-dev\venv && venv\Scripts\pip install playwright==1.55.0
 #   브라우저는 설치된 Edge(channel msedge)를 쓰므로 playwright install은 필요 없다.
 # Microsoft Store Python은 AppData 쓰기를 패키지 캐시로 돌리므로 venv 실제 위치를 찾아 쓴다.
@@ -9,8 +10,8 @@ cd "$(dirname "$0")/.."
 DISTRO=${WSL_DISTRO_NAME:?WSL 안에서 실행하세요}
 NODE=$(command -v node)
 # 빌드 결과가 없거나 소스보다 오래됐으면 다시 빌드한다. 고친 코드 대신 지난 빌드를 시험하지 않게 한다.
-if [ ! -f dist/viewer.html ] || [ ! -f dist/mdview/mdview.mjs ] ||
-  [ -n "$(find web launcher skill tools/build.mjs package.json -newer dist/viewer.html -print -quit)" ]; then
+if [ ! -f dist/viewer.html ] || [ ! -f dist/mdview/mdview.mjs ] || [ ! -f dist/MDViewer.exe ] ||
+  [ -n "$(find web launcher skill host tools/build.mjs tools/exe.mjs package.json -newer dist/viewer.html -print -quit)" ]; then
   node tools/build.mjs
 fi
 WIN_LOCAL=$(wslpath -u "$(cd /mnt/c && cmd.exe /c 'echo %LOCALAPPDATA%' 2>/dev/null | tr -d '\r')")
@@ -30,12 +31,12 @@ trap cleanup EXIT
 cp -r dist/mdview "$WORK/app"
 rm -rf "$RUN"
 mkdir -p "$RUN/out"
-cp tests/e2e/e2e.py dist/viewer.html "$RUN/"
+cp tests/e2e/e2e.py dist/viewer.html dist/MDViewer.exe "$RUN/"
 
 set +e
 (cd /mnt/c && WSLENV=PYTHONUTF8 PYTHONUTF8=1 "$PY" "$(wslpath -w "$RUN/e2e.py")" \
   --distro "$DISTRO" --node "$NODE" --work "$WORK" \
-  --viewer "$(wslpath -w "$RUN/viewer.html")" --out "$(wslpath -w "$RUN/out")" "$@") | sed -u 's/\r$//'
+  --viewer "$(wslpath -w "$RUN/viewer.html")" --exe "$(wslpath -w "$RUN/MDViewer.exe")" --out "$(wslpath -w "$RUN/out")" "$@") | sed -u 's/\r$//'
 code=${PIPESTATUS[0]}
 set -e
 mkdir -p build/e2e

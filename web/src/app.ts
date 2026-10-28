@@ -349,6 +349,12 @@ export class App {
       this.saveSession.flush();
       this.saveSettings.flush();
     };
+    // Windows 앱: 앱을 다시 실행해 넘긴 위치를 이 창에서 열고, 창을 닫기 전에 저장한 뒤 닫아도 된다고 알린다.
+    this.bridge.on('open.paths', (p: { paths?: PathEntry[] }) => void this.openEntries(p.paths ?? []));
+    this.bridge.on('app.closing', () => {
+      flush();
+      void this.bridge.request('app.quit').catch(() => {});
+    });
     window.addEventListener('pagehide', flush);
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'hidden') flush();
@@ -784,6 +790,8 @@ export class App {
     const dark = this.isDark();
     document.documentElement.dataset.theme = dark ? 'dark' : 'light';
     this.source?.setDark(dark);
+    // Windows 앱의 제목 표시줄도 맞춘다. 시작할 때는 호스트가 저장된 설정을 보고 이미 맞췄다.
+    if (this.started && this.bridge.mode === 'desktop') void this.bridge.request('window.setTheme', { dark }).catch((err) => this.logError(String(err)));
   }
 
   private setTheme(theme: Theme) {
@@ -1101,6 +1109,15 @@ export class App {
         this.saveSession.trigger();
       },
     });
+    c.register({
+      id: 'app.openWith', title: S.cmd.openWith, checked: () => !!this.info?.registered,
+      run: async () => {
+        const on = !this.info?.registered;
+        await this.bridge.request('app.register', { on });
+        if (this.info) this.info.registered = on;
+        toast(on ? S.toast.openWithOn : S.toast.openWithOff);
+      },
+    });
     // v1.1 이후 기능의 단축키(SRS 4.2). 기능은 없지만 키를 잡아 브라우저 기본 동작(뒤로 가기·즐겨찾기 등)으로 빠지지 않게 한다.
     const later: [string, string][] = [
       ['nav.back', 'Alt+Left'], ['nav.forward', 'Alt+Right'], ['nav.gotoLine', 'Ctrl+G'], ['nav.quickOpen', 'Ctrl+Shift+O'], ['find.inFolder', 'Ctrl+Shift+F'],
@@ -1173,7 +1190,14 @@ export class App {
           ];
         },
       },
-      { label: S.menu.settings, key: 'T', items: () => [{ cmd: 'view.remoteImages' }, ...(this.bridge.mode === 'standalone' ? [{ cmd: 'view.rememberHandles' }] : [])] },
+      {
+        label: S.menu.settings, key: 'T',
+        items: () => [
+          { cmd: 'view.remoteImages' },
+          ...(this.bridge.mode === 'standalone' ? [{ cmd: 'view.rememberHandles' }] : []),
+          ...(this.bridge.mode === 'desktop' ? [{ cmd: 'app.openWith' }] : []),
+        ],
+      },
       { label: S.menu.help, key: 'H', items: () => [{ cmd: 'help.shortcuts' }, { cmd: 'help.about' }] },
     ];
   }
@@ -1202,8 +1226,8 @@ export class App {
     const body = document.createElement('div');
     const lines = [
       S.dialog.version(i?.version ?? '?'),
-      this.bridge.mode === 'launcher' ? S.dialog.modeLauncher : S.dialog.modeStandalone,
-      S.dialog.storage,
+      this.bridge.mode === 'desktop' ? S.dialog.modeDesktop : this.bridge.mode === 'launcher' ? S.dialog.modeLauncher : S.dialog.modeStandalone,
+      this.bridge.mode === 'desktop' ? S.dialog.storageDesktop(i?.dataDir ?? '?') : S.dialog.storage,
     ];
     for (const l of lines) body.append(Object.assign(document.createElement('p'), { textContent: l }));
     void showDialog(S.cmd.helpAbout, body);

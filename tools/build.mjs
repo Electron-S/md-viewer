@@ -7,12 +7,14 @@ import { copyFileSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, w
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { deflateRawSync } from 'node:zlib';
+import { buildExe } from './exe.mjs';
 
 // 아래 경로는 모두 저장소 루트 기준이다. 다른 폴더에서 불러도 그 폴더의 dist를 지우지 않게 루트로 옮긴다.
 process.chdir(fileURLToPath(new URL('..', import.meta.url)));
 const VERSION = JSON.parse(readFileSync('package.json', 'utf8')).version;
 const define = { __MDV_VERSION__: JSON.stringify(VERSION) };
 const MAX_VIEWER = 2 * 1024 * 1024;
+const MAX_EXE = 4 * 1024 * 1024;
 const MAX_BUNDLE = 2.5 * 1024 * 1024;
 
 rmSync('dist', { recursive: true, force: true });
@@ -83,6 +85,17 @@ const bundleSize = readdirSync('dist/mdview').reduce((n, f) => n + statSync(join
 console.log(`viewer.html ${(viewerSize / 1024).toFixed(0)} KB, mdview/ ${(bundleSize / 1024).toFixed(0)} KB, ${zipPath} ${(statSync(zipPath).size / 1024).toFixed(0)} KB`);
 if (viewerSize > MAX_VIEWER) throw new Error('viewer.html이 2 MB를 넘습니다');
 if (bundleSize > MAX_BUNDLE) throw new Error('스킬 묶음이 2.5 MB를 넘습니다');
+
+console.log('== 6. Windows 앱 (MDViewer.exe)');
+// 릴리스에는 HTML과 EXE를 함께 낸다. EXE는 csc(.NET Framework)가 있는 Windows·WSL에서만 만들 수 있다.
+const exe = await buildExe({ version: VERSION, viewer: 'dist/viewer.html', out: 'dist/MDViewer.exe' });
+if (exe) {
+  const exeSize = statSync('dist/MDViewer.exe').size;
+  console.log(`MDViewer.exe ${(exeSize / 1024).toFixed(0)} KB`);
+  if (exeSize > MAX_EXE) throw new Error('MDViewer.exe가 4 MB를 넘습니다');
+} else {
+  console.log('csc.exe가 없어 건너뜀 (Windows나 WSL에서 빌드하세요)');
+}
 console.log('== 완료');
 
 /** 폴더 하나를 zip으로 묶는다(deflate). 별도 도구 없이 Node 표준 라이브러리만 쓴다. */
