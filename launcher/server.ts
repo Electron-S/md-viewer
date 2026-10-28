@@ -287,9 +287,10 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     }
     if (!url.pathname.startsWith('/api/')) throw new ApiError(404, 'ENOENT', L.err.noApi);
     if (!tokenOk(url.searchParams.get('t'))) throw new ApiError(403, 'EFORBIDDEN', L.err.forbidden);
-    // 토큰이 맞는 요청마다 유휴 시간을 새로 센다. 오래 쉬던 실행기를 다시 쓴 명령이 낸 주소가 뷰어가 붙기 전에 끊기지 않게 한다.
-    touchIdle();
     const q = (k: string) => url.searchParams.get(k);
+    // 토큰이 맞는 요청마다 유휴 시간을 새로 센다. 오래 쉬던 실행기를 다시 쓴 명령이 낸 주소가 뷰어가 붙기 전에 끊기지 않게 한다.
+    // 상태만 묻는 ping(--status·--stop)은 세지 않는다. 지켜보는 것만으로 실행기가 남으면 안 된다. 다시 쓸 명령은 use=1을 붙인다.
+    if (route !== 'GET /api/ping' || q('use')) touchIdle();
 
     switch (route) {
       case 'GET /api/ping':

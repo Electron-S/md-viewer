@@ -67,7 +67,7 @@ UI 문자열은 `web/src/strings.ts`와 `launcher/strings.ts` 두 표에만 둡�
 ```bash
 npm ci
 node tools/build.mjs   # 타입 검사 → dist/viewer.html, dist/mdview/, dist/mdview-<버전>.zip, 크기 검사
-node tools/test.mjs    # 단위 테스트 99개(화면 58, 실행기 41. CommonMark 스펙 652개·GFM 확장 24개, XSS, 문자열 분리 등)
+node tools/test.mjs    # 단위 테스트 101개(화면 58, 실행기 43. CommonMark 스펙 652개·GFM 확장 24개, XSS, 문자열 분리 등)
 ./tools/e2e.sh         # E2E (WSL + Windows Edge. 준비는 tools/e2e.sh 머리말 참고)
 ```
 

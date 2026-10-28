@@ -104,6 +104,19 @@ def write(path: pathlib.Path, text: str, encoding='utf-8'):
     return path
 
 
+def replace_file(src: pathlib.Path, dst: pathlib.Path) -> int:
+    """임시 파일로 대상을 바꾼다(원자적 저장). \\\\wsl.localhost 너머의 교체는 Windows 쪽의 다른 프로세스가 방금 쓴 파일을
+    잠깐 열고 있으면 액세스 거부(WinError 5)로 실패하므로 잠시 뒤 다시 한다. 다시 한 횟수를 돌려준다."""
+    for n in range(20):
+        try:
+            os.replace(src, dst)
+            return n
+        except PermissionError:
+            time.sleep(0.05)
+    os.replace(src, dst)
+    return 20
+
+
 def readme_text():
     return '\n'.join([
         '# 사용 설명서',
@@ -654,7 +667,7 @@ def run_launcher(pw, L, ctx):
         a.page.wait_for_timeout(400)
         line0 = a.ev('() => __mdv.tabs.active().line')
         body = path.read_bytes().decode('utf-8').split('\n', 1)[1]
-        lat, drift, not_ok, reflected = [], 0.0, 0, 0
+        lat, drift, not_ok, reflected, retries = [], 0.0, 0, 0, 0
         for i in range(1, 101):
             marker = f'저장 {i:03d}'
             t0 = time.time()
@@ -662,7 +675,7 @@ def run_launcher(pw, L, ctx):
                 write(path, f'# {marker}\n' + body)
             else:
                 write(tmp, f'# {marker}\n' + body)
-                os.replace(tmp, path)
+                retries += replace_file(tmp, path)
             try:
                 a.wait('(m) => __mdv.preview.article.querySelector("h1")?.textContent === m', 3000, arg=marker)
                 lat.append((time.time() - t0) * 1000)
@@ -674,7 +687,7 @@ def run_launcher(pw, L, ctx):
             not_ok += st['state'] != 'ok'
         med = statistics.median(lat) if lat else 9999
         check('FR-WATCH-01', '외부 편집기로 100회 저장: 매번 반영', reflected == 100,
-              f'{reflected}/100 반영, 지연 중앙값 {med:.0f} ms, 최대 {max(lat or [0]):.0f} ms (제자리 저장 50·교체 저장 50)')
+              f'{reflected}/100 반영, 지연 중앙값 {med:.0f} ms, 최대 {max(lat or [0]):.0f} ms (제자리 저장 50·교체 저장 50, 교체 재시도 {retries}회)')
         check('FR-WATCH-01', '100회 저장 동안 스크롤 줄 유지, 삭제 표시 없음', drift < 1.5 and not_ok == 0, f'줄 {line0:.1f}, 최대 차이 {drift:.2f}, 삭제 표시 {not_ok}회')
         check('NFR-PERF-04', '저장부터 화면 반영 0.5초 이내(100회 중앙값, 실행기 모드)', med < 500, f'{med:.0f} ms')
         renamed = DOCS / 'other 이름 변경.md'

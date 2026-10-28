@@ -249,9 +249,22 @@ test('토큰이 맞는 요청은 유휴 시간을 새로 센다: 오래 쉬던 �
   const a = await startServer({ home: h, viewerPath: makeViewer(h), version: 't', port: 0, idleMs: 400, platform });
   for (let i = 1; i <= 5; i++) {
     await sleep(100);
-    assert.equal((await request(a.port, `/api/ping${q(a.token)}`)).status, 200, `${i * 100} ms`);
+    assert.equal((await request(a.port, `/api/ping${q(a.token, { use: '1' })}`)).status, 200, `${i * 100} ms`);
   }
   await Promise.race([a.closed, sleep(3000).then(() => assert.fail('요청이 끊긴 뒤에도 끝나지 않음'))]);
+});
+
+test('상태만 묻는 ping(use 없음)은 유휴 시간을 새로 세지 않는다: 지켜보는 것만으로 실행기가 남지 않는다 (FR-LAUNCH-03)', async () => {
+  const h = tempDir();
+  const a = await startServer({ home: h, viewerPath: makeViewer(h), version: 't', port: 0, idleMs: 300, platform });
+  let closed = false;
+  void a.closed.then(() => (closed = true));
+  const t0 = Date.now();
+  while (!closed && Date.now() - t0 < 3000) {
+    await request(a.port, `/api/ping${q(a.token)}`).catch(() => null);
+    await sleep(50);
+  }
+  assert.ok(closed, '상태만 묻는 동안 끝나지 않음');
 });
 
 test('setTimeout 상한을 넘는 유휴 시간(MDVIEW_IDLE_MS)이어도 바로 끝나지 않는다', async () => {

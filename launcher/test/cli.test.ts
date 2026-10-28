@@ -262,6 +262,24 @@ test('동시에 두 명령이 실행기를 찾아도 start.lock으로 하나만 
   assert.ok(c.pid > 0);
 });
 
+test('다시 쓰는 명령은 실행기의 유휴 시간을 새로 세고, 상태 확인(--status)은 세지 않는다 (FR-LAUNCH-03)', async () => {
+  const home = tempDir();
+  homes.push(home);
+  const srv = await startServer({ home, viewerPath: viewer, version: VERSION, port: 0, idleMs: 400 });
+  for (let i = 1; i <= 5; i++) {
+    await sleep(100);
+    assert.equal((await ensureServer(io(home, home))).pid, process.pid, `${i * 100} ms`);
+  }
+  let closed = false;
+  void srv.closed.then(() => (closed = true));
+  const t0 = Date.now();
+  while (!closed && Date.now() - t0 < 3000) {
+    await runCli(['--status'], io(home, home));
+    await sleep(50);
+  }
+  assert.ok(closed, '--status로 묻는 동안 끝나지 않음');
+});
+
 test('다른 버전의 실행기가 떠 있으면 멈추고 새로 띄운다', async () => {
   const home = tempDir();
   homes.push(home);

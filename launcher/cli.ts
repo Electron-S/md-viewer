@@ -109,7 +109,7 @@ export function apiRequest(port: number, token: string, method: 'GET' | 'POST', 
         method,
         // 연결을 붙잡아 두지 않는다. 명령이 바로 끝나고, 닫힌 서버의 소켓을 다시 쓰지 않게 한다.
         agent: false,
-        path: `${api}?t=${encodeURIComponent(token)}`,
+        path: `${api}${api.includes('?') ? '&' : '?'}t=${encodeURIComponent(token)}`,
         headers: { host: `127.0.0.1:${port}`, ...(data ? { 'content-type': 'application/json', 'content-length': data.length } : {}) },
         timeout: timeoutMs,
       },
@@ -142,11 +142,14 @@ async function apiCall(port: number, token: string, api: string, body: unknown, 
 
 export type Probe = { kind: 'ok'; version: string; pid: number } | { kind: 'forbidden' } | { kind: 'down' };
 
-/** 그 포트·토큰의 실행기가 살아 있는지. 403이면 다른 토큰의 서버(또는 다른 프로그램)가 그 포트를 쓴다. */
-export async function probe(port: number | null, token: string | null): Promise<Probe> {
+/**
+ * 그 포트·토큰의 실행기가 살아 있는지. 403이면 다른 토큰의 서버(또는 다른 프로그램)가 그 포트를 쓴다.
+ * use면 다시 쓸 실행기로 보고 유휴 시간을 새로 세게 한다. 상태만 보는 확인(--status)은 실행기의 수명을 늘리지 않는다.
+ */
+export async function probe(port: number | null, token: string | null, use = false): Promise<Probe> {
   if (!port || !token) return { kind: 'down' };
   try {
-    const r = await apiRequest(port, token, 'GET', '/api/ping', undefined, 300);
+    const r = await apiRequest(port, token, 'GET', use ? '/api/ping?use=1' : '/api/ping', undefined, 300);
     if (r.status === 200) {
       const v = JSON.parse(r.text);
       return { kind: 'ok', version: String(v.version ?? ''), pid: Number(v.pid) };
@@ -172,8 +175,8 @@ export function ownLiveProcess(pid: number | null | undefined): boolean {
 }
 
 /** state.json이 가리키는 실행기에 묻는다. 내 실행기가 떠 있을 수 없는 상태면 묻지 않고 down으로 본다. */
-function probeState(st: { port: number | null; token: string | null; pid: number | null } | null): Promise<Probe> {
-  return st && ownLiveProcess(st.pid) ? probe(st.port, st.token) : Promise.resolve({ kind: 'down' });
+function probeState(st: { port: number | null; token: string | null; pid: number | null } | null, use = false): Promise<Probe> {
+  return st && ownLiveProcess(st.pid) ? probe(st.port, st.token, use) : Promise.resolve({ kind: 'down' });
 }
 
 export async function ping(port: number, token: string): Promise<{ version: string; pid: number } | null> {
@@ -219,14 +222,14 @@ async function acquireLock(home: string): Promise<() => void> {
 export async function ensureServer(io: CliIo, preferredPort?: number): Promise<{ port: number; token: string; pid: number; reused: boolean }> {
   const home = homeDir(io.env);
   const first = readState(home);
-  const quick = await probeState(first);
+  const quick = await probeState(first, true);
   if (quick.kind === 'ok' && quick.version === VERSION) return { port: first!.port!, token: first!.token!, pid: quick.pid, reused: true };
 
   const release = await acquireLock(home);
   try {
     // 잠금을 기다리는 동안 다른 명령이 띄웠을 수 있다.
     const st = readState(home);
-    const now = await probeState(st);
+    const now = await probeState(st, true);
     if (now.kind === 'ok' && now.version === VERSION) return { port: st!.port!, token: st!.token!, pid: now.pid, reused: true };
     if (now.kind === 'ok') {
       io.out(L.versionRestart(now.version));
