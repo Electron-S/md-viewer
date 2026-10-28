@@ -69,7 +69,7 @@ html, body {
   overflow: hidden;
   background: var(--bg);
   color: var(--fg);
-  font: 13px/1.4 "Segoe UI", "Malgun Gothic", sans-serif;
+  font: 13px/1.4 "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
 }
 
 button {

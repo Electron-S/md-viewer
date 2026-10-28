@@ -103,6 +103,8 @@ const ko = {
     renderLarge: '미리보기 그리기',
     docFailed: (msg: string) => `이 문서를 렌더링하지 못해 원문을 표시합니다: ${msg}`,
     blockFailed: (msg: string) => `이 블록을 렌더링하지 못해 원문을 표시합니다: ${msg}`,
+    /** 문서 앞머리(YAML front matter) 상자의 제목 (FR-REN-08) */
+    frontMatter: '메타데이터',
     needFolder: '이 문서의 상대 경로 이미지·링크를 보려면 문서가 든 폴더를 여세요.',
     openFolder: '폴더 열기',
   },

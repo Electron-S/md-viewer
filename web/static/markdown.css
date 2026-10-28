@@ -6,7 +6,7 @@
   margin: 0 auto;
   padding: 24px 32px 64px;
   color: var(--md-fg);
-  font: 15px/1.65 "Segoe UI", "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
+  font: 15px/1.65 "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
   word-wrap: break-word;
 }
 
@@ -62,6 +62,12 @@
 .markdown-body th, .markdown-body td { padding: 6px 13px; border: 1px solid var(--md-border); }
 .markdown-body th { font-weight: 600; }
 .markdown-body tr:nth-child(2n) { background: var(--md-table-alt); }
+/* 앞머리(YAML front matter) 상자 (FR-REN-08): 접을 수 있고, 표의 키는 왼쪽 열에 한 줄로 둔다. */
+.markdown-body details.mdv-front-matter { margin: 0 0 16px; padding: 8px 12px; border: 1px solid var(--md-border); border-radius: 6px; }
+.markdown-body details.mdv-front-matter > summary { color: var(--md-muted); font-size: 0.875em; cursor: pointer; user-select: none; }
+.markdown-body details.mdv-front-matter[open] > summary { margin-bottom: 8px; }
+.markdown-body details.mdv-front-matter > table, .markdown-body details.mdv-front-matter > pre { margin: 0; }
+.markdown-body details.mdv-front-matter th { text-align: left; vertical-align: top; white-space: nowrap; }
 
 .markdown-body .footnotes { font-size: 0.85em; color: var(--md-muted); }
 .markdown-body .footnotes-sep { height: 1px; background: var(--md-border); border: 0; margin-top: 32px; }

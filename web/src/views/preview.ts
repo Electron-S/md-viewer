@@ -372,6 +372,9 @@ export class PreviewView {
     }
     const m = this.marks[this.current];
     m.classList.add('mdv-current');
+    // 접힌 앞머리 상자 안의 일치는 상자를 펼쳐야 보인다 (FR-REN-08).
+    const box = m.closest('details');
+    if (box && !box.open) box.open = true;
     m.scrollIntoView({ block: 'center' });
     return { count: n, index: this.current };
   }

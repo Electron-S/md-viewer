@@ -175,3 +175,14 @@ test('그리지 못한 블록의 오류 상자는 정제를 거쳐도 남는다 
   assert.equal(box.querySelector('pre.mdv-plain')!.textContent, '```\n<img src=x onerror=alert(1)>\n```');
   assert.equal(div.querySelector('img'), null);
 });
+
+test('앞머리 상자는 정제 뒤에도 접을 수 있는 상자로 남는다 (FR-REN-08)', () => {
+  const { html } = renderMarkdown(createMarkdown(), '---\nname: <img src=x onerror=alert(1)>\n---\n');
+  const box = clean(html).querySelector('details.mdv-front-matter');
+  assert.ok(box);
+  assert.ok(box.hasAttribute('open'));
+  assert.equal(box.getAttribute('data-line'), '0');
+  assert.equal(box.querySelector('summary')?.textContent, '메타데이터');
+  assert.equal(box.querySelector('td')?.textContent, '<img src=x onerror=alert(1)>');
+  assert.equal(box.querySelector('img'), null);
+});

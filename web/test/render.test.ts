@@ -76,6 +76,32 @@ test('코드 강조: 알려진 언어만, 모르는 언어는 그대로 (FR-REN-
 test('큰 문서용 목차 스캔은 펜스 안 #을 건너뛴다', () => {
   const h = scanHeadings('# 하나\n```\n# 코드 안\n```\n## 둘 ##\n');
   assert.deepEqual(h.map((x) => [x.level, x.text, x.line]), [[1, '하나', 0], [2, '둘', 4]]);
+  assert.deepEqual(scanHeadings('---\n# 주석\n---\n# 제목\n').map((x) => [x.text, x.line]), [['제목', 3]]);
+});
+
+test('앞머리(front matter)는 제목이 아니라 접을 수 있는 키·값 상자로 그린다 (FR-REN-08)', () => {
+  const md = createMarkdown();
+  const src = "---\nname: mdview\ndescription: 첫 문장. \"따옴표\" 그대로\n# 주석\ntitle: 'it''s'\nurl: http://a.b/c\n---\n\n# 제목\n";
+  const out = renderMarkdown(md, src);
+  assert.equal(
+    out.html.split('<h1')[0],
+    '<details class="mdv-front-matter" data-line="0" open>\n<summary>메타데이터</summary>\n<table>\n<tbody>\n' +
+      '<tr><th>name</th><td>mdview</td></tr>\n' +
+      '<tr><th>description</th><td>첫 문장. &quot;따옴표&quot; 그대로</td></tr>\n' +
+      "<tr><th>title</th><td>it's</td></tr>\n" +
+      '<tr><th>url</th><td>http://a.b/c</td></tr>\n' +
+      '</tbody>\n</table>\n</details>\n',
+  );
+  assert.deepEqual(out.headings.map((h) => [h.text, h.line]), [['제목', 8]]);
+  // 한 단계 `키: 값`이 아닌 YAML은 줄을 지킨 원문으로
+  assert.match(renderMarkdown(md, '---\ntags:\n  - a\n  - <b>\n---\n본문\n').html, /^<details class="mdv-front-matter" data-line="0" open>\n<summary>메타데이터<\/summary>\n<pre class="mdv-plain">tags:\n {2}- a\n {2}- &lt;b&gt;<\/pre>\n<\/details>\n<p data-line="5">본문<\/p>/);
+  assert.match(renderMarkdown(md, '---\n...\n본문\n').html, /^<p data-line="2">본문<\/p>/, '빈 앞머리는 그리지 않는다');
+  // 닫히지 않았거나 첫 줄이 아니거나 GFM 확장을 끈 렌더러면 CommonMark대로
+  assert.match(renderMarkdown(md, '---\nname: x\n').html, /^<hr data-line="0" \/>/);
+  assert.match(renderMarkdown(md, '\n---\nname: x\n---\n').html, /<h2 id="name-x" data-line="2">name: x<\/h2>/);
+  assert.match(renderMarkdown(md, '> ---\n> a: b\n> ---\n').html, /<blockquote data-line="0">\n<hr/);
+  const plain = createMarkdown({ sourceMap: false, extensions: false, highlight: false });
+  assert.equal(plain.render('---\nname: x\n---\n'), '<hr />\n<h2>name: x</h2>\n');
 });
 
 test('비정상 입력에서도 멈추지 않는다 (NFR-REL-01)', () => {

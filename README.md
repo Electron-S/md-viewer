@@ -2,7 +2,7 @@
 
 설치 없이 쓰는 Markdown 뷰어입니다. HTML 파일 하나(`viewer.html`)를 브라우저로 열어 쓰거나, Windows 앱(`MDViewer.exe`)으로 탐색기에서 문서를 바로 열거나, Claude Code에서 "이 문서 열어줘"라고 하면 스킬이 브라우저에 띄워 줍니다. 탭으로 여러 문서를 열고, 미리보기·원문·분할 보기를 오가며 읽고, 목차와 작업 공간 트리로 이동합니다.
 
-- 버전: v1.1.0 ([릴리스 노트](RELEASE_NOTES.md))
+- 버전: v1.1.1 ([릴리스 노트](RELEASE_NOTES.md))
 - 뷰어: Edge·Chrome 최근 버전(모든 기능), Firefox·Safari 최신판(열기·렌더링·찾기·보기 모드)
 - Windows 앱: Windows 10/11 x64. WebView2 런타임과 .NET Framework 4.8이 필요하며 둘 다 Windows에 기본으로 들어 있습니다.
 - 실행기·스킬: Node.js 18 이상(Windows 10/11, WSL2, macOS, Linux)

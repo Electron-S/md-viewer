@@ -1,4 +1,4 @@
-import markdownit, { type MarkdownIt, type Token } from 'markdown-it';
+import markdownit, { type MarkdownIt, type StateBlock, type Token } from 'markdown-it';
 import footnote from 'markdown-it-footnote';
 import taskLists from 'markdown-it-task-lists';
 import hljs from 'highlight.js/lib/common';
@@ -58,6 +58,46 @@ const GFM_EMAIL = /^mailto:[A-Za-z0-9.+_-]+@[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+$
 /** GFM tagfilter: 이 태그들은 여는 태그·닫는 태그 모두 지우지 않고 `<`를 `&lt;`로 바꿔 글자로 보여준다. */
 const TAGFILTER = /<(?=\/?(title|textarea|style|xmp|iframe|noembed|noframes|script|plaintext)[\s/>])/gi;
 
+/**
+ * 문서 맨 앞 YAML 앞머리(front matter)의 닫는 줄 번호. 첫 줄이 `---`이고 뒤에 `---`나 `...` 줄이 있어야 한다. 없으면 -1.
+ * 앞머리가 아니면 CommonMark대로 `---`는 구분선, 그 아래 글은 `---`를 밑줄 삼은 제목이 된다.
+ */
+function frontMatterClose(count: number, line: (i: number) => string): number {
+  if (count < 2 || !/^---[ \t]*$/.test(line(0))) return -1;
+  for (let i = 1; i < count; i++) if (/^(?:---|\.\.\.)[ \t]*$/.test(line(i))) return i;
+  return -1;
+}
+
+function frontMatter(state: StateBlock, startLine: number, endLine: number, silent: boolean): boolean {
+  if (startLine !== 0 || state.level !== 0) return false;
+  const line = (i: number) => state.src.slice(state.bMarks[i], state.eMarks[i]);
+  const close = frontMatterClose(endLine, line);
+  if (close < 0) return false;
+  if (silent) return true;
+  const t = state.push('front_matter', '', 0);
+  t.block = true;
+  t.markup = '---';
+  t.map = [0, close + 1];
+  t.content = Array.from({ length: close - 1 }, (_, k) => line(k + 1)).join('\n');
+  state.line = close + 1;
+  return true;
+}
+
+/** 한 단계짜리 `키: 값` 줄로만 된 앞머리면 [키, 값] 목록. 들여 쓴 줄·목록처럼 그 밖의 YAML이 있으면 null. */
+function flatYaml(src: string): [string, string][] | null {
+  const rows: [string, string][] = [];
+  for (const raw of src.split('\n')) {
+    if (/^\s*(?:#.*)?$/.test(raw)) continue;
+    const m = /^([^\s#'"][^:]*?):(?:[ \t]+(.*?))?[ \t]*$/.exec(raw);
+    if (!m) return null;
+    let value = m[2] ?? '';
+    if (/^'.*'$/.test(value)) value = value.slice(1, -1).replace(/''/g, "'");
+    else if (/^"[^"\\]*"$/.test(value)) value = value.slice(1, -1);
+    rows.push([m[1], value]);
+  }
+  return rows;
+}
+
 export function createMarkdown(opts: MarkdownOptions = {}): MarkdownIt {
   const { sourceMap = true, extensions = true } = opts;
   const md = markdownit({
@@ -81,6 +121,18 @@ export function createMarkdown(opts: MarkdownOptions = {}): MarkdownIt {
       },
     });
     md.use(footnote).use(taskLists, { enabled: false, label: false });
+    // 앞머리는 본문과 떼어 접을 수 있는 상자에 키·값 표로 보여준다 (FR-REN-08). 표로 못 옮기는 YAML은 줄을 지킨 원문으로.
+    md.block.ruler.before('table', 'front_matter', frontMatter);
+    md.renderer.rules.front_matter = (tokens, idx, _options, _env, self) => {
+      const t = tokens[idx];
+      const esc = md.utils.escapeHtml;
+      const rows = flatYaml(t.content);
+      if (rows?.length === 0) return '';
+      const body = rows
+        ? `<table>\n<tbody>\n${rows.map(([k, v]) => `<tr><th>${esc(k)}</th><td>${esc(v)}</td></tr>\n`).join('')}</tbody>\n</table>\n`
+        : `<pre class="mdv-plain">${esc(t.content)}</pre>\n`;
+      return `<details class="mdv-front-matter"${self.renderAttrs(t)} open>\n<summary>${esc(S.preview.frontMatter)}</summary>\n${body}</details>\n`;
+    };
     md.core.ruler.push('mdv_gfm', (state) => {
       for (const t of state.tokens) {
         if (t.type === 'html_block') t.content = t.content.replace(TAGFILTER, '&lt;');
@@ -207,7 +259,8 @@ export function scanHeadings(text: string): Heading[] {
   const out: Heading[] = [];
   const lines = text.split(/\r\n|\r|\n/);
   let fence: string | null = null;
-  for (let i = 0; i < lines.length; i++) {
+  // 앞머리 안의 `# 주석`은 제목이 아니다.
+  for (let i = frontMatterClose(lines.length, (k) => lines[k]) + 1; i < lines.length; i++) {
     const line = lines[i];
     const f = /^ {0,3}(`{3,}|~{3,})/.exec(line);
     if (f) {
