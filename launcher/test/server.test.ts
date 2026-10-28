@@ -12,6 +12,8 @@ let docs: string;
 let outside: string;
 let srv: RunningServer;
 const platform = { platform: process.platform, wsl: false, env: {} };
+/** 시험 중에 탐색기를 띄우지 않도록 바꿔 끼우는 위치 열기 */
+let revealImpl: (file: string) => Promise<boolean> = async () => true;
 
 before(async () => {
   home = tempDir();
@@ -24,7 +26,10 @@ before(async () => {
   outside = tempDir('mdv-outside-');
   fs.writeFileSync(path.join(outside, 'secret.md'), 'secret', 'utf8');
   fs.symlinkSync(outside, path.join(docs, 'escape'));
-  srv = await startServer({ home, viewerPath: makeViewer(home), version: 't', port: 0, idleMs: 60_000, maxBytes: 1024, platform, logger: new Logger(path.join(home, 'logs')) });
+  srv = await startServer({
+    home, viewerPath: makeViewer(home), version: 't', port: 0, idleMs: 60_000, maxBytes: 1024, platform, logger: new Logger(path.join(home, 'logs')),
+    reveal: (f) => revealImpl(f),
+  });
   srv.addRoot(docs);
 });
 
@@ -57,6 +62,18 @@ test('뷰어 HTML도 토큰이 있어야 주고, localhost는 127.0.0.1로 보�
   assert.equal(r.headers['x-content-type-options'], 'nosniff');
   assert.equal(r.headers['access-control-allow-origin'], undefined);
   assert.match(r.body.toString('utf8'), /<title>viewer<\/title>/);
+});
+
+test('뷰어 HTML을 읽지 못하면 500으로 답하고 원인을 로그에 남긴다', async () => {
+  const h = tempDir();
+  const s = await startServer({ home: h, viewerPath: path.join(h, 'none.html'), version: 't', port: 0, idleMs: 60_000, platform, logger: new Logger(path.join(h, 'logs')) });
+  try {
+    const r = await request(s.port, `/${q(s.token)}`);
+    assert.deepEqual([r.status, r.json().code], [500, 'EIO']);
+    assert.match(fs.readFileSync(path.join(h, 'logs', 'mdview.log'), 'utf8'), /\[error\] .*none\.html.*ENOENT/);
+  } finally {
+    await s.close('test');
+  }
 });
 
 test('ready·ping: 버전, 루트, 경로 형식', async () => {
@@ -101,6 +118,20 @@ test('허용 폴더 밖과 심볼릭 링크로 빠져나가기는 403 (SDD 8.4)'
   assert.equal((await api('/api/list', { path: path.join(docs, 'escape') })).status, 403);
 });
 
+test('예상하지 못한 파일 시스템 오류(심볼릭 링크 순환)는 500으로 답하고 토큰 없이 로그에 남긴다 (NFR-REL-03)', { skip: process.platform === 'win32' }, async () => {
+  const loop = path.join(docs, 'loop.md');
+  fs.symlinkSync(loop, loop);
+  try {
+    const r = await api('/api/read', { path: loop });
+    assert.deepEqual([r.status, r.json().code], [500, 'EIO']);
+    const log = fs.readFileSync(path.join(home, 'logs', 'mdview.log'), 'utf8');
+    assert.match(log, /\[error\] .*\/api\/read: ELOOP/);
+    assert.ok(!log.includes(srv.token), '주소의 토큰은 로그에 남기지 않는다');
+  } finally {
+    fs.rmSync(loop, { force: true });
+  }
+});
+
 test('목록: 이름과 폴더 여부를 그대로 준다 (거르기는 화면이 한다)', async () => {
   const r = await api('/api/list', { path: docs });
   const names = (r.json() as { name: string; isDir: boolean }[]).map((e) => `${e.name}:${e.isDir}`).sort();
@@ -132,6 +163,25 @@ test('POST는 JSON만, 64 KB까지', async () => {
   assert.match(log, /\[error\] \[뷰어\] 뷰어 오류/);
   assert.equal((await postJson(srv.port, srv.token, '/api/roots', { root: 'relative' })).status, 400);
   assert.equal((await request(srv.port, `/api/nothing${q(srv.token)}`)).status, 404);
+});
+
+test('탐색기에서 위치 열기: 허용 폴더 안만 열고, 띄우지 못하면 오류로 답한다 (FR-INFO-03)', async () => {
+  const file = path.join(docs, 'README.md');
+  const opened: string[] = [];
+  revealImpl = async (f) => (opened.push(f), true);
+  assert.equal((await postJson(srv.port, srv.token, '/api/reveal', { path: file })).status, 204);
+  assert.deepEqual(opened, [fs.realpathSync.native(file)]);
+  assert.equal((await postJson(srv.port, srv.token, '/api/reveal', { path: path.join(outside, 'secret.md') })).status, 403);
+  assert.equal(opened.length, 1, '허용 폴더 밖은 열지 않는다');
+  revealImpl = async () => false;
+  const missing = await postJson(srv.port, srv.token, '/api/reveal', { path: file });
+  assert.deepEqual([missing.status, missing.json().code], [500, 'EIO'], '탐색기 명령이 없으면 204로 넘기지 않는다');
+  revealImpl = async () => {
+    throw new Error('wslpath failed');
+  };
+  assert.equal((await postJson(srv.port, srv.token, '/api/reveal', { path: file })).status, 500);
+  assert.match(fs.readFileSync(path.join(home, 'logs', 'mdview.log'), 'utf8'), /\[warn\] .*wslpath failed/, '원인은 로그에 남긴다');
+  revealImpl = async () => true;
 });
 
 test('감시: 변경·교체 저장·삭제·이름 변경·되살리기를 SSE로 알린다 (FR-WATCH-01~02)', async () => {
@@ -194,6 +244,24 @@ test('연결된 뷰어 없이 유휴 시간이 지나면 끝나고, 포트·토�
   await b.close('test');
 });
 
+test('토큰이 맞는 요청은 유휴 시간을 새로 센다: 오래 쉬던 실행기를 다시 써도 낸 주소가 바로 끊기지 않는다 (FR-LAUNCH-03)', async () => {
+  const h = tempDir();
+  const a = await startServer({ home: h, viewerPath: makeViewer(h), version: 't', port: 0, idleMs: 400, platform });
+  for (let i = 1; i <= 5; i++) {
+    await sleep(100);
+    assert.equal((await request(a.port, `/api/ping${q(a.token)}`)).status, 200, `${i * 100} ms`);
+  }
+  await Promise.race([a.closed, sleep(3000).then(() => assert.fail('요청이 끊긴 뒤에도 끝나지 않음'))]);
+});
+
+test('setTimeout 상한을 넘는 유휴 시간(MDVIEW_IDLE_MS)이어도 바로 끝나지 않는다', async () => {
+  const h = tempDir();
+  const a = await startServer({ home: h, viewerPath: makeViewer(h), version: 't', port: 0, idleMs: 3_000_000_000, platform });
+  await sleep(100);
+  assert.equal((await request(a.port, `/api/ping${q(a.token)}`)).status, 200);
+  await a.close('test');
+});
+
 test('명령에 준 포트(--port)가 state.json의 지난 포트보다 앞선다', async () => {
   const h = tempDir();
   const viewer = makeViewer(h);
@@ -216,6 +284,24 @@ test('선호 포트를 다른 프로그램이 쓰면 빈 포트를 고른다', a
   const h = tempDir();
   const b = await startServer({ home: h, viewerPath: makeViewer(h), version: 't', port: srv.port, idleMs: 60_000, platform });
   assert.notEqual(b.port, srv.port);
+  await b.close('test');
+});
+
+/** 이 환경에서 1024 아래 포트를 열면 EACCES가 나는지 (root이거나 sysctl로 낮췄으면 아니다) */
+function lowPortsDenied(): boolean {
+  if (process.platform === 'win32' || process.getuid?.() === 0) return false;
+  try {
+    return Number(fs.readFileSync('/proc/sys/net/ipv4/ip_unprivileged_port_start', 'utf8')) > 1;
+  } catch {
+    return false;
+  }
+}
+
+test('선호 포트를 쓸 권한이 없으면(EACCES) 빈 포트를 고른다', { skip: !lowPortsDenied() }, async () => {
+  const h = tempDir();
+  const b = await startServer({ home: h, viewerPath: makeViewer(h), version: 't', port: 1, idleMs: 60_000, platform });
+  assert.notEqual(b.port, 1);
+  assert.equal(readState(h)!.port, b.port, '고른 포트를 다음 실행이 먼저 쓴다');
   await b.close('test');
 });
 

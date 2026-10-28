@@ -1,7 +1,8 @@
-// 두 브리지가 함께 쓰는 규칙: 폴더 목록 거르기, 바이트를 문서로 바꾸기, 이미지 종류.
+// 두 브리지가 함께 쓰는 규칙: 폴더 목록 거르기, 바이트를 문서로 바꾸기, 이미지 종류, 오류 문구.
 import { decodeBytes, type Encoding } from '../encoding';
 import { isMarkdownPath, isTextPath } from '../render/paths';
-import type { DirEntry, HostDoc } from './types';
+import { S } from '../strings';
+import { HostError, type DirEntry, type HostDoc } from './types';
 
 /** 파일 하나의 최대 크기. 넘으면 ETOOBIG. */
 export const MAX_FILE_BYTES = 200 * 1024 * 1024;
@@ -52,6 +53,19 @@ const IMAGE_TYPES: Record<string, string> = {
   ico: 'image/x-icon',
   avif: 'image/avif',
 };
+
+/** 브리지 오류 코드로 HostError를 만든다. 화면 문구가 없는 코드면 fallback(실행기가 준 문구 등)을 쓴다. */
+export function hostError(code: string, fallback?: string): HostError {
+  const known: Record<string, string> = {
+    ENOENT: S.error.noFile,
+    EACCES: S.error.accessDenied,
+    EISDIR: S.error.isFolder,
+    ETOOBIG: S.error.tooBig,
+    ENOTSUP: S.error.notSupported,
+    EINVAL: S.error.badPath,
+  };
+  return new HostError(code, known[code] ?? fallback ?? S.error.host);
+}
 
 /** 문서 이미지로 보여줄 수 있는 확장자면 MIME 형식, 아니면 null */
 export function imageType(path: string): string | null {

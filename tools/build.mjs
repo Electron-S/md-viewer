@@ -5,8 +5,11 @@ import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { copyFileSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { deflateRawSync } from 'node:zlib';
 
+// 아래 경로는 모두 저장소 루트 기준이다. 다른 폴더에서 불러도 그 폴더의 dist를 지우지 않게 루트로 옮긴다.
+process.chdir(fileURLToPath(new URL('..', import.meta.url)));
 const VERSION = JSON.parse(readFileSync('package.json', 'utf8')).version;
 const define = { __MDV_VERSION__: JSON.stringify(VERSION) };
 const MAX_VIEWER = 2 * 1024 * 1024;
@@ -40,7 +43,8 @@ const raw = `window.__mdvLoadSource=function(){${source.outputFiles[0].text}};\n
 if (/\\<(!--|\/?script)/i.test(raw)) throw new Error('번들에 \\< 로 시작하는 민감한 시퀀스가 있어 안전하게 바꿀 수 없습니다');
 const js = raw.replace(/<(!--|\/?script)/gi, '\\x3C$1');
 const hash = createHash('sha256').update(js, 'utf8').digest('base64');
-let html = readFileSync('web/static/index.html', 'utf8');
+// Windows에서 git이 CRLF로 꺼낸 파일이어도 아래 찾기(줄 끝 \n 포함)가 맞도록 줄 끝을 LF로 맞춘다.
+let html = readFileSync('web/static/index.html', 'utf8').replace(/\r\n/g, '\n');
 const replaceOnce = (from, to) => {
   if (!html.includes(from)) throw new Error(`index.html에 ${from} 이 없습니다`);
   html = html.replace(from, () => to);

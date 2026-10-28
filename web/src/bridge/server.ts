@@ -3,7 +3,7 @@
 import { isEncoding } from '../encoding';
 import { isInside, normalizePath } from '../render/paths';
 import { S } from '../strings';
-import { filterEntries, toHostDoc } from './listing';
+import { filterEntries, hostError, toHostDoc } from './listing';
 import type { LocalBridge } from './local';
 import { Emitter, HostError, type Bridge, type BridgeEvent, type DirEntry, type PathEntry, type ReadyInfo } from './types';
 
@@ -11,7 +11,7 @@ const isLocal = (p: unknown) => typeof p === 'string' && /^mdv:/i.test(p);
 
 export class ServerBridge implements Bridge {
   readonly mode = 'launcher' as const;
-  readonly caps = { reveal: true, fullPaths: true };
+  readonly caps = { reveal: true };
   private readonly token: string;
   private readonly client = Math.random().toString(36).slice(2) + Date.now().toString(36);
   private roots: string[] = [];
@@ -63,15 +63,7 @@ export class ServerBridge implements Bridge {
     }
     if (!res.ok) {
       const e = (await res.json().catch(() => null)) as { code?: string; message?: string } | null;
-      const code = e?.code ?? 'EHOST';
-      const known: Record<string, string> = {
-        ENOENT: S.error.noFile,
-        EACCES: S.error.accessDenied,
-        EISDIR: S.error.isFolder,
-        ETOOBIG: S.error.tooBig,
-        EINVAL: S.error.badPath,
-      };
-      throw new HostError(code, known[code] ?? e?.message ?? S.error.host);
+      throw hostError(e?.code ?? 'EHOST', e?.message);
     }
     return res;
   }
@@ -122,11 +114,10 @@ export class ServerBridge implements Bridge {
     es.addEventListener('file.changed', (e) => this.events.emit('file.changed', JSON.parse((e as MessageEvent).data)));
     es.addEventListener('file.deleted', (e) => this.events.emit('file.deleted', JSON.parse((e as MessageEvent).data)));
     es.onopen = () => {
-      if (!this.online) {
-        this.online = true;
-        this.events.emit('bridge.online');
-        if (this.watching.length) void this.call('POST', '/api/watch', {}, { client: this.client, paths: this.watching }).catch(() => {});
-      }
+      if (this.online) return;
+      this.online = true;
+      this.events.emit('bridge.online');
+      if (this.watching.length) void this.rewatch(this.watching);
     };
     es.onerror = () => {
       if (this.online) {
@@ -134,6 +125,19 @@ export class ServerBridge implements Bridge {
         this.events.emit('bridge.offline');
       }
     };
+  }
+
+  /**
+   * 다시 붙은 뒤 감시를 다시 걸고 열린 문서를 모두 다시 읽게 한다. 끊긴 동안 실행기는 이 뷰어의 감시 목록을 버렸으므로
+   * (다시 떴으면 처음부터 없다) 그사이 바뀌거나 지워진 파일은 알림이 오지 않는다. 감시를 먼저 걸어 그 뒤의 변경도 놓치지 않는다.
+   */
+  private async rewatch(paths: string[]) {
+    try {
+      await this.call('POST', '/api/watch', {}, { client: this.client, paths });
+    } catch (err) {
+      void this.request('app.log', { level: 'error', msg: String(err) });
+    }
+    for (const path of paths) this.events.emit('file.changed', { path });
   }
 
   disconnect() {

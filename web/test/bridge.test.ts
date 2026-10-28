@@ -114,6 +114,28 @@ test('파일 핸들 브리지: 끌어다 놓은 폴더를 mdv: 위치로 읽고 
   await assert.rejects(b.request('file.read', { path: 'mdv:/d9/a.md' }), (e: HostError) => e.code === 'ENOENT');
 });
 
+test('파일 핸들 브리지: 그림 주소는 위치마다 하나만 두고, 그림이 바뀌면 옛 주소를 놓아준다 (FR-REN-03, NFR-PERF-06)', async () => {
+  const b = new LocalBridge();
+  const { root } = tree();
+  const png = root.children.get('c.png') as FakeFile;
+  await b.takeDrop(dataTransfer([{ handle: root }]));
+  const revoked: string[] = [];
+  const revoke = URL.revokeObjectURL;
+  URL.revokeObjectURL = (u: string) => (revoked.push(u), revoke(u));
+  try {
+    const first = await b.loadImage('mdv:/d1/c.png');
+    assert.ok(first?.startsWith('blob:'));
+    assert.equal(await b.loadImage('mdv:/d1/c.png'), first, '바뀌지 않은 그림은 같은 주소를 다시 쓴다');
+    png.lastModified = 2;
+    const second = await b.loadImage('mdv:/d1/c.png');
+    assert.notEqual(second, first);
+    assert.deepEqual(revoked, [first]);
+    assert.equal(await b.loadImage('mdv:/d1/a.md'), null, '그림이 아닌 파일');
+  } finally {
+    URL.revokeObjectURL = revoke;
+  }
+});
+
 test('파일 핸들 브리지: 단독 파일은 상대 경로를 못 따라가고, 폴더를 열면 그 기준으로 옮긴다 (FR-REN-03, SDD 7.2)', async () => {
   const b = new LocalBridge();
   const { root, x } = tree();
@@ -274,6 +296,30 @@ test('파일 핸들 브리지: 저장소는 세션이 가리키는 핸들만 남
     assert.deepEqual([...rows.keys()], ['d1'], '세션이 다시 가리키면 되살린다');
   }));
 
+test('파일 핸들 브리지: 권한을 다시 받기 전인 저장된 폴더로는 열지 않고, 받지 못한 위치는 다시 시도하게 남긴다 (SDD 7.4)', () =>
+  withIndexedDB(async () => {
+    const { root, x } = tree();
+    const other = new FakeDir('다른 폴더');
+    const a = new LocalBridge();
+    await a.takeDrop(dataTransfer([{ handle: root }]));
+    await a.takeDrop(dataTransfer([{ handle: other }]));
+    await settle();
+
+    const b = new LocalBridge();
+    assert.equal((await b.request('app.ready')).restorable, 2);
+    const [picked] = await b.takeDrop(dataTransfer([{ handle: x }]));
+    assert.match(picked.path, /^mdv:\/f\d+\/x\.md$/, '잠긴 폴더(d1) 기준 위치로 바꾸면 읽을 수 없다');
+    assert.equal((await b.request('file.read', { path: picked.path })).text, '# 엑스\n');
+
+    Object.assign(root, { requestPermission: async () => 'granted' });
+    Object.assign(other, { requestPermission: async () => Promise.reject(domErr('SecurityError')) });
+    assert.deepEqual(await b.request('session.restore'), { restored: 1, remaining: 1 });
+    assert.equal(b.isPending('mdv:/d1/a.md'), false);
+    assert.equal(b.isPending('mdv:/d2/a.md'), true, '요청이 실패한 위치는 잠긴 채 남는다');
+    const [again] = await b.takeDrop(dataTransfer([{ handle: x }]));
+    assert.equal(again.path, 'mdv:/d1/sub/x.md', '권한을 받은 폴더는 다시 기준이 된다');
+  }));
+
 test('파일 핸들 브리지: 열린 파일을 폴링해 변경·삭제를 알린다 (FR-WATCH-01~02)', async () => {
   const b = new LocalBridge({ pollMs: 20 });
   const { root, x } = tree();
@@ -388,19 +434,29 @@ test('실행기 브리지: SSE 이벤트를 받고 끊김·재연결을 알린�
   es.fire('file.changed', { path: '/a.md' });
   es.onerror!();
   es.onopen!();
+  await settle();
   es.fire('file.deleted', { path: '/a.md' });
-  assert.deepEqual(seen, ['changed /a.md', 'offline', 'online', 'deleted /a.md']);
-  assert.equal(calls.filter((c) => c.url.startsWith('/api/watch')).length, 2, '다시 붙으면 감시 목록을 다시 보낸다');
+  // 끊긴 동안의 변경은 알림이 오지 않으므로, 다시 붙으면 감시를 다시 걸고 열린 문서를 다시 읽게 한다.
+  assert.deepEqual(seen, ['changed /a.md', 'offline', 'online', 'changed /a.md', 'deleted /a.md']);
+  const watches = calls.filter((c) => c.url.startsWith('/api/watch'));
+  assert.equal(watches.length, 2, '다시 붙으면 감시 목록을 다시 보낸다');
+  assert.deepEqual(JSON.parse(watches[1].body!).paths, ['/a.md']);
 });
 
 test('파일 핸들 브리지: 핸들 없는 파일은 고른 폴더에서 이름·크기로 찾고, 세션에는 핸들 위치만 남긴다 (SDD 7.2, 7.4)', async () => {
   const b = new LocalBridge();
-  const { root } = tree();
+  const { root, x } = tree();
   const [mem] = await b.takeDrop(dataTransfer([{ file: new File([enc('# 엑스\n')], 'x.md') }]));
   const [dir] = await b.takeDrop(dataTransfer([{ handle: root }]));
   assert.equal((await b.request('file.relocate', { path: mem.path, dir: dir.path })).path, `${dir.path}sub/x.md`);
   const [other] = await b.takeDrop(dataTransfer([{ file: new File([enc('다른 내용')], 'x.md') }]));
   assert.equal((await b.request('file.relocate', { path: other.path, dir: dir.path })).path, null, '크기가 다르면 다른 파일');
+  x.deleted = true;
+  await assert.rejects(
+    b.request('file.relocate', { path: mem.path, dir: dir.path }),
+    (e: HostError) => e instanceof HostError && e.code === 'ENOENT',
+    '폴더를 훑다 난 브라우저 예외는 브리지 오류로 바꾼다',
+  );
   assert.ok(b.isRestorable(`${dir.path}sub/x.md`), '폴더 핸들 위치는 다시 열 수 있다');
   assert.ok(!b.isRestorable(mem.path), '핸들 없는 파일은 다시 열 수 없다');
   await b.request('handles.remember', { on: false });

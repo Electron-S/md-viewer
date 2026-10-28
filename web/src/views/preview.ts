@@ -131,6 +131,8 @@ export class PreviewView {
   setNotice(notice: { text: string; action?: { label: string; run: () => void } } | null) {
     this.noticeEl.replaceChildren();
     this.noticeEl.hidden = !notice;
+    // 띠가 문서를 밀어 내리므로 재 둔 블록 위치를 버린다.
+    this.anchors = null;
     if (!notice) return;
     const p = document.createElement('span');
     p.textContent = notice.text;

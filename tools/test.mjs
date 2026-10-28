@@ -2,7 +2,10 @@
 import * as esbuild from 'esbuild';
 import { existsSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
+// 경로는 저장소 루트 기준이다(build.mjs와 같다).
+process.chdir(fileURLToPath(new URL('..', import.meta.url)));
 const out = 'build/test';
 rmSync(out, { recursive: true, force: true });
 const VERSION = JSON.parse(readFileSync('package.json', 'utf8')).version;

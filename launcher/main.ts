@@ -13,20 +13,32 @@ const scriptPath = fileURLToPath(import.meta.url);
 const here = path.dirname(scriptPath);
 const argv = process.argv.slice(2);
 
+/**
+ * 숫자 환경 변수(양수). 없으면 undefined. 잘못된 값은 로그에 남기고 undefined(기본값)로 둔다.
+ * NaN을 그대로 넘기면 유휴 타이머가 1 ms로 돌아 서버가 바로 끝나고, 크기 상한은 꺼진다.
+ */
+function positiveEnv(name: string, logger: Logger): number | undefined {
+  const raw = process.env[name];
+  if (!raw) return undefined;
+  const n = Number(raw);
+  if (Number.isFinite(n) && n > 0) return n;
+  logger.write('warn', L.log.badEnv(name, raw));
+  return undefined;
+}
+
 async function serve(args: string[]) {
   const home = homeDir();
   const logger = new Logger(logsDir(home));
   process.on('uncaughtException', (e) => logger.write('error', L.log.uncaught(e.stack ?? String(e))));
   const i = args.indexOf('--port');
   const port = i >= 0 ? Number(args[i + 1]) : undefined;
-  const env = process.env;
   const server = await startServer({
     home,
-    viewerPath: env.MDVIEW_VIEWER || path.join(here, 'viewer.html'),
+    viewerPath: process.env.MDVIEW_VIEWER || path.join(here, 'viewer.html'),
     version: VERSION,
     port: Number.isInteger(port) ? port : undefined,
-    idleMs: env.MDVIEW_IDLE_MS ? Number(env.MDVIEW_IDLE_MS) : undefined,
-    maxBytes: env.MDVIEW_MAX_BYTES ? Number(env.MDVIEW_MAX_BYTES) : undefined,
+    idleMs: positiveEnv('MDVIEW_IDLE_MS', logger),
+    maxBytes: positiveEnv('MDVIEW_MAX_BYTES', logger),
     logger,
     exitOnClose: true,
   });

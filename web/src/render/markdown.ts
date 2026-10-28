@@ -49,11 +49,14 @@ function trimAutolink(s: string): string {
   }
 }
 
-/** GFM 확장 이메일 자동 링크: 도메인은 영숫자·`-`·`_`를 마침표로 나눈 것이고 마지막 글자가 `-`·`_`가 아니다. */
+/**
+ * GFM 확장 이메일 자동 링크의 글자 규칙: 이름은 영숫자·`.`·`+`·`-`·`_`, 도메인은 영숫자·`-`·`_`를 마침표로 나눈 것(`+` 없음).
+ * 끝 글자가 `-`·`_`인 주소(`a@b.c-`)는 이 정규식이 아니라 linkify-it이 애초에 링크로 잡지 않는다(GFM 스펙 예제로 확인).
+ */
 const GFM_EMAIL = /^mailto:[A-Za-z0-9.+_-]+@[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+$/;
 
-/** GFM tagfilter: 이 태그들은 지우지 않고 `<`를 `&lt;`로 바꿔 글자로 보여준다. */
-const TAGFILTER = /<(?=(title|textarea|style|xmp|iframe|noembed|noframes|script|plaintext)[\s/>])/gi;
+/** GFM tagfilter: 이 태그들은 여는 태그·닫는 태그 모두 지우지 않고 `<`를 `&lt;`로 바꿔 글자로 보여준다. */
+const TAGFILTER = /<(?=\/?(title|textarea|style|xmp|iframe|noembed|noframes|script|plaintext)[\s/>])/gi;
 
 export function createMarkdown(opts: MarkdownOptions = {}): MarkdownIt {
   const { sourceMap = true, extensions = true } = opts;

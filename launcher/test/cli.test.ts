@@ -5,13 +5,13 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import path from 'node:path';
 import { buildSync } from 'esbuild';
-import { ensureServer, findRoot, installShim, parseArgs, resolveArg, runCli, type CliIo } from '../cli';
+import { cmdShim, ensureServer, findRoot, installShim, parseArgs, resolveArg, runCli, type CliIo } from '../cli';
 import { Logger } from '../log';
-import { browserCommands, revealCommand, splitCommand, waitWindowsReachable } from '../os';
+import { browserCommands, launch, revealCommand, splitCommand, waitWindowsReachable } from '../os';
 import { startServer } from '../server';
 import { readState, writeState } from '../state';
 import { VERSION } from '../version';
-import { makeViewer, tempDir } from './helpers';
+import { makeViewer, sleep, tempDir } from './helpers';
 
 let bundle: string;
 let viewer: string;
@@ -187,6 +187,28 @@ test('없는 파일은 오류로 끝난다', async () => {
   assert.equal(readState(home), null, '서버를 띄우지 않는다');
 });
 
+test('잘못된 환경 변수 값(MDVIEW_IDLE_MS=10m)은 로그에 남기고 기본값을 쓴다', async () => {
+  const home = tempDir();
+  homes.push(home);
+  const x = io(home, home);
+  x.env = { ...x.env, MDVIEW_IDLE_MS: '10m' };
+  assert.equal(await runCli(['--no-open', '--port', '0'], x), 0, x.errors.join('\n'));
+  await sleep(300);
+  assert.ok(readState(home)!.pid, '유휴 시간이 NaN(1 ms)이 되어 바로 끝나지 않는다');
+  assert.match(fs.readFileSync(path.join(home, 'logs', 'mdview.log'), 'utf8'), /\[warn\] .*MDVIEW_IDLE_MS=10m/);
+});
+
+test('허용 폴더를 등록하지 못하면 주소를 내지 않고 오류로 끝난다', async () => {
+  const home = tempDir();
+  homes.push(home);
+  const x = io(home, home);
+  const missing = path.join(home, '없는 폴더');
+  assert.equal(await runCli(['--no-open', '--port', '0', '--root', missing], x), 1);
+  assert.match(x.errors[0], /허용 폴더를 등록하지 못했습니다/);
+  assert.ok(x.errors[0].includes(missing));
+  assert.ok(!x.lines.some((l) => l.startsWith('http://')), '뷰어 주소를 내지 않는다');
+});
+
 test('스킬 설치: SKILL.md·mdview.mjs·viewer.html을 복사하고 mdview 명령을 만든다 (FR-LAUNCH-05)', async () => {
   const target = path.join(tempDir(), '스킬', 'mdview');
   const x = io(tempDir(), tempDir());
@@ -214,6 +236,13 @@ test('스킬 설치: SKILL.md·mdview.mjs·viewer.html을 복사하고 mdview �
   assert.equal(path.basename(rw.file), 'mdview.cmd');
   assert.equal(path.dirname(rw.file), path.join(w.env.MDVIEW_HOME!, 'bin'));
   assert.match(fs.readFileSync(rw.file, 'utf8'), /^@node "C:\\skills\\mdview.mdview\.mjs" %\*\r\n$/);
+  // cmd.exe는 배치 파일을 CP949로 읽으므로 한글 사용자 이름이 든 경로는 %~dp0 기준 상대 경로(ASCII)로 적는다.
+  assert.equal(
+    cmdShim('C:\\Users\\홍길동\\.mdview\\bin', 'C:\\Users\\홍길동\\.claude\\skills\\mdview\\mdview.mjs'),
+    '@node "%~dp0..\\..\\.claude\\skills\\mdview\\mdview.mjs" %*\r\n',
+  );
+  assert.equal(cmdShim('C:\\Users\\me\\.mdview\\bin', 'D:\\100%\\mdview.mjs'), '@node "D:\\100%%\\mdview.mjs" %*\r\n', '다른 드라이브는 절대 경로, %는 %%');
+  assert.equal(cmdShim('C:\\a\\bin', 'C:\\a\\스킬\\mdview.mjs'), '@node "C:\\a\\스킬\\mdview.mjs" %*\r\n', '상대 경로에도 한글이 남으면 절대 경로');
 });
 
 test('동시에 두 명령이 실행기를 찾아도 start.lock으로 하나만 띄운다', async () => {
@@ -295,6 +324,15 @@ test('브라우저 열기 명령: 환경 변수, WSL, Windows, macOS, Linux (FR-
   assert.deepEqual(revealCommand('/home/me/a.md', { platform: 'linux', wsl: true, env: {} }, () => 'C:\\x\\a.md'), ['explorer.exe', ['/select,C:\\x\\a.md']]);
   assert.deepEqual(revealCommand('/home/me/a.md', { platform: 'darwin', wsl: false, env: {} }), ['open', ['-R', '/home/me/a.md']]);
   assert.deepEqual(revealCommand('/home/me/a.md', { platform: 'linux', wsl: false, env: {} }), ['xdg-open', ['/home/me']]);
+});
+
+test('브라우저 열기: 열기 명령이 곧바로 실패 코드로 끝나면 연 것으로 보지 않는다 (FR-LAUNCH-04)', async () => {
+  const node = (code: string): [string, string[]] => [process.execPath, ['-e', code]];
+  assert.equal(await launch(['mdv-no-such-command', []], 2000), false, '명령이 없음');
+  assert.equal(await launch(node('process.exit(3)'), 2000), false, '화면이 없어 xdg-open이 실패한 경우');
+  assert.equal(await launch(node(''), 2000), true, '0으로 끝남');
+  assert.equal(await launch(node('setTimeout(() => {}, 1000)'), 100), true, '기다리는 시간보다 오래 돌면 연 것으로 본다');
+  assert.equal(await launch(node('process.exit(3)')), true, '기다리지 않으면(Windows 쪽 명령) 띄운 것만 본다');
 });
 
 test('로그는 1 MB(여기선 작은 크기)에서 순환하며 3개만 남긴다 (NFR-REL-03)', () => {

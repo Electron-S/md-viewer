@@ -47,6 +47,7 @@ export class Watcher {
   private debounceMs: number;
   private pollMs: number;
   private poll: (file: string) => boolean;
+  private ignoreCase: boolean;
 
   constructor(
     private onEvent: (e: WatchEvent) => void,
@@ -59,6 +60,8 @@ export class Watcher {
       const platform = currentPlatform();
       this.poll = (f) => needsPolling(f, platform);
     }
+    // 알림마다 다시 정하지 않는다(WSL 판별이 /proc/version을 읽는다).
+    this.ignoreCase = opts.ignoreCase ?? caseInsensitiveFs({ platform: process.platform });
   }
 
   /** 감시 대상을 통째로 바꾼다. */
@@ -96,8 +99,7 @@ export class Watcher {
         const d = this.dirs.get(dir);
         if (!d) return;
         const base = name ? String(name) : null;
-        const ignoreCase = this.opts.ignoreCase ?? caseInsensitiveFs(currentPlatform());
-        const same = (a: string, b: string) => (ignoreCase ? a.toLowerCase() === b.toLowerCase() : a === b);
+        const same = (a: string, b: string) => (this.ignoreCase ? a.toLowerCase() === b.toLowerCase() : a === b);
         for (const f of d.files) if (!base || same(path.basename(f), base)) this.schedule(f);
       });
     } catch (err) {

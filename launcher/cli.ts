@@ -73,7 +73,11 @@ export function parseArgs(argv: string[]): CliArgs {
   return a;
 }
 
-const insideDir = (child: string, dir: string) => child === dir || child.startsWith(dir.endsWith(path.sep) ? dir : dir + path.sep);
+/** child가 dir 안(같거나 아래)에 있는지. Windows는 대소문자를 가리지 않는다(`--root c:\…`와 `C:\…` 파일). */
+function insideDir(child: string, dir: string): boolean {
+  const [c, d] = process.platform === 'win32' ? [child.toLowerCase(), dir.toLowerCase()] : [child, dir];
+  return c === d || c.startsWith(d.endsWith(path.sep) ? d : d + path.sep);
+}
 
 /**
  * 문서가 속할 허용 폴더(SDD 2장): `--root`가 그 문서를 품으면 그것, 아니면 가장 가까운 git 저장소 루트,
@@ -113,12 +117,27 @@ export function apiRequest(port: number, token: string, method: 'GET' | 'POST', 
         const chunks: Buffer[] = [];
         res.on('data', (c: Buffer) => chunks.push(c));
         res.on('end', () => resolve({ status: res.statusCode ?? 0, text: Buffer.concat(chunks).toString('utf8') }));
+        // 응답을 받는 도중에 끊기거나 시간이 지나면(req.destroy) 오류는 req가 아니라 res로 온다. 받지 않으면 명령이 죽는다.
+        res.on('error', reject);
       },
     );
     req.on('timeout', () => req.destroy(new Error('timeout')));
     req.on('error', reject);
     req.end(data);
   });
+}
+
+/** 실행기 API를 부르고, 2xx가 아니면 실행기가 준 오류 문구(없으면 상태 코드)를 담아 CliError로 끝낸다. */
+async function apiCall(port: number, token: string, api: string, body: unknown, fail: (msg: string) => string): Promise<void> {
+  const r = await apiRequest(port, token, 'POST', api, body);
+  if (r.status >= 200 && r.status < 300) return;
+  let msg = `HTTP ${r.status}`;
+  try {
+    msg = String(JSON.parse(r.text).message ?? msg);
+  } catch {
+    // 오류 본문이 JSON이 아니면 상태 코드만 알린다.
+  }
+  throw new CliError(fail(msg));
 }
 
 export type Probe = { kind: 'ok'; version: string; pid: number } | { kind: 'forbidden' } | { kind: 'down' };
@@ -252,6 +271,19 @@ export function resolveArg(arg: string, io: CliIo): string {
   return path.resolve(io.cwd, arg);
 }
 
+/**
+ * Windows 바로 가기(mdview.cmd)의 내용. cmd.exe는 배치 파일을 콘솔 코드 페이지(한국어 Windows는 CP949)로 읽으므로
+ * UTF-8로 적은 한글 경로(사용자 이름 등)는 깨진다. 그래서 실행기 위치를 바로 가기 폴더(%~dp0) 기준 상대 경로로 적어
+ * 파일에는 ASCII만 남긴다. 상대 경로로 적을 수 없으면(다른 드라이브, 한글이 든 상대 경로) 절대 경로를 쓴다.
+ */
+export function cmdShim(shimDir: string, script: string): string {
+  const rel = path.win32.relative(shimDir, script);
+  const ascii = /^[\x20-\x7e]+$/.test(rel) && !path.win32.isAbsolute(rel);
+  // 배치 파일에서 글자 %는 %%로 적어야 한다.
+  const target = ascii ? `%~dp0${rel.replace(/%/g, '%%')}` : script.replace(/%/g, '%%');
+  return `@node "${target}" %*\r\n`;
+}
+
 /** `mdview` 명령 바로 가기를 만든다. POSIX는 ~/.local/bin/mdview, Windows는 <실행기 홈>/bin/mdview.cmd. */
 export function installShim(io: CliIo, skillDir: string): { file: string; dir: string; onPath: boolean } {
   const platform = io.platform ?? currentPlatform(io.env);
@@ -259,7 +291,7 @@ export function installShim(io: CliIo, skillDir: string): { file: string; dir: s
   const dir = win ? path.join(homeDir(io.env), 'bin') : path.join(io.userHome ?? os.homedir(), '.local', 'bin');
   const file = path.join(dir, win ? 'mdview.cmd' : 'mdview');
   const script = path.join(skillDir, 'mdview.mjs');
-  const body = win ? `@node "${script}" %*\r\n` : `#!/bin/sh\nexec node "${script.replace(/["\\$`]/g, '\\$&')}" "$@"\n`;
+  const body = win ? cmdShim(dir, script) : `#!/bin/sh\nexec node "${script.replace(/["\\$`]/g, '\\$&')}" "$@"\n`;
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(file, body, { encoding: 'utf8', mode: 0o755 });
   fs.chmodSync(file, 0o755);
@@ -307,7 +339,7 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
         io.out(L.status(st.port, alive.pid));
         return 0;
       }
-      await apiRequest(st.port, st.token, 'POST', '/api/stop', {});
+      await apiCall(st.port, st.token, '/api/stop', {}, L.stopFailed);
       io.out(L.stopped);
       return 0;
     }
@@ -328,7 +360,8 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
     if (!server.reused && (io.platform ?? currentPlatform(io.env)).wsl) await (io.waitReachable ?? waitWindowsReachable)(server.port);
     const roots = new Set(targets.map((t) => findRoot(t.path, t.isDir, root)));
     if (root && !targets.length) roots.add(root);
-    for (const r of roots) await apiRequest(server.port, server.token, 'POST', '/api/roots', { root: r });
+    // 허용 폴더를 등록하지 못하면(--root가 없는 폴더 등) 뷰어가 문서를 읽지 못하므로 주소를 내지 않고 끝낸다.
+    for (const r of roots) await apiCall(server.port, server.token, '/api/roots', { root: r }, (msg) => L.rootFailed(r, msg));
 
     const q = new URLSearchParams({ t: server.token });
     for (const t of targets) q.append(t.isDir ? 'd' : 'f', t.path);

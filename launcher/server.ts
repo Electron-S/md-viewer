@@ -25,6 +25,8 @@ const IMAGE_TYPES: Record<string, string> = {
   '.avif': 'image/avif',
 };
 const SVG_CSP = "default-src 'none'; style-src 'unsafe-inline'";
+/** setTimeout이 받는 최대 지연(약 24.8일). 넘기면 Node가 1 ms로 바꿔 실행기가 바로 끝난다. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
 
 export interface ServerOptions {
   home: string;
@@ -32,13 +34,15 @@ export interface ServerOptions {
   version: string;
   /** 먼저 시도할 포트. 없으면 state.json의 포트, 그것도 없으면 DEFAULT_PORT. 0이면 빈 포트 */
   port?: number;
-  /** 연결된 뷰어 없이 이만큼 지나면 끝난다 */
+  /** 연결된 뷰어도, 토큰이 맞는 요청도 없이 이만큼 지나면 끝난다 */
   idleMs?: number;
   maxBytes?: number;
   logger?: Logger;
   platform?: Platform;
   /** 끝날 때 프로세스도 끝낼지 (실행 파일은 true, 테스트는 false) */
   exitOnClose?: boolean;
+  /** 탐색기에서 파일 위치 열기(기본: os.reveal). 테스트에서 바꿔 끼운다. */
+  reveal?: (file: string) => Promise<boolean>;
 }
 
 export interface RunningServer {
@@ -50,13 +54,15 @@ export interface RunningServer {
   addRoot(root: string): void;
 }
 
+/** 화면에 돌려줄 오류. cause가 있으면 예상하지 못한 오류(파일 시스템 오류 등)를 감싼 것이라 로그에도 남긴다. */
 class ApiError extends Error {
   constructor(
     readonly status: number,
     readonly code: string,
     message: string,
+    options?: ErrorOptions,
   ) {
-    super(message);
+    super(message, options);
   }
 }
 
@@ -85,7 +91,7 @@ function fsError(e: unknown): ApiError {
   if (code === 'ENOENT' || code === 'ENOTDIR') return new ApiError(404, 'ENOENT', L.err.noFile);
   if (code === 'EACCES' || code === 'EPERM') return new ApiError(403, 'EACCES', L.err.denied);
   if (code === 'EISDIR') return new ApiError(409, 'EISDIR', L.err.isDir);
-  return new ApiError(500, 'EIO', (e as Error)?.message ?? L.err.internal);
+  return new ApiError(500, 'EIO', (e as Error)?.message ?? L.err.internal, { cause: e });
 }
 
 export async function startServer(opts: ServerOptions): Promise<RunningServer> {
@@ -96,7 +102,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   const prev = readState(opts.home);
   const token = prev?.token ?? crypto.randomBytes(32).toString('base64url');
   const tokenBuf = Buffer.from(token);
-  const idleMs = opts.idleMs ?? 600_000;
+  const idleMs = Math.min(opts.idleMs ?? 600_000, MAX_TIMER_MS);
   const maxBytes = opts.maxBytes ?? 200 * 1024 * 1024;
 
   /** 허용 폴더: 사용자가 준 경로(화면에 보이는 형태) → 실제 경로. 오래전에 더한 것이 앞이다. */
@@ -128,6 +134,18 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     }
     for (const r of roots.values()) if (inside(real, r)) return real;
     throw new ApiError(403, 'EACCES', L.err.outside);
+  };
+
+  /** 검사한 파일을 읽는다. 폴더면 409, 크기 상한을 넘으면 413. */
+  const readFile = (real: string): { body: Buffer; mtimeMs: number } => {
+    try {
+      const st = fs.statSync(real);
+      if (st.isDirectory()) throw new ApiError(409, 'EISDIR', L.err.isDir);
+      if (st.size > maxBytes) throw new ApiError(413, 'ETOOBIG', L.err.tooBig);
+      return { body: fs.readFileSync(real), mtimeMs: st.mtimeMs };
+    } catch (e) {
+      throw e instanceof ApiError ? e : fsError(e);
+    }
   };
 
   // ---- SSE 연결과 감시
@@ -250,10 +268,13 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
         return;
       }
       if (!tokenOk(url.searchParams.get('t'))) throw new ApiError(403, 'EFORBIDDEN', L.err.forbidden);
+      touchIdle();
       let v;
       try {
         v = loadViewer();
-      } catch {
+      } catch (e) {
+        // ApiError는 로그에 남지 않으므로 원인(없음·권한 등)은 여기서 남긴다.
+        log('error', L.log.viewerFailed(opts.viewerPath, (e as Error)?.message ?? String(e)));
         throw new ApiError(500, 'EIO', L.err.viewerMissing);
       }
       const csp = v.csp ? `${v.csp.replace(/;\s*$/, '')}; frame-ancestors 'none'` : "frame-ancestors 'none'";
@@ -266,6 +287,8 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     }
     if (!url.pathname.startsWith('/api/')) throw new ApiError(404, 'ENOENT', L.err.noApi);
     if (!tokenOk(url.searchParams.get('t'))) throw new ApiError(403, 'EFORBIDDEN', L.err.forbidden);
+    // 토큰이 맞는 요청마다 유휴 시간을 새로 센다. 오래 쉬던 실행기를 다시 쓴 명령이 낸 주소가 뷰어가 붙기 전에 끊기지 않게 한다.
+    touchIdle();
     const q = (k: string) => url.searchParams.get(k);
 
     switch (route) {
@@ -274,22 +297,8 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
       case 'GET /api/ready':
         return json(res, 200, { version: opts.version, roots: [...roots.keys()], pathStyle: win ? 'win' : 'posix' });
       case 'GET /api/read': {
-        const real = allowed(q('path'));
-        let st: fs.Stats;
-        try {
-          st = fs.statSync(real);
-        } catch (e) {
-          throw fsError(e);
-        }
-        if (st.isDirectory()) throw new ApiError(409, 'EISDIR', L.err.isDir);
-        if (st.size > maxBytes) throw new ApiError(413, 'ETOOBIG', L.err.tooBig);
-        let body: Buffer;
-        try {
-          body = fs.readFileSync(real);
-        } catch (e) {
-          throw fsError(e);
-        }
-        return send(res, 200, body, { 'content-type': 'application/octet-stream', 'x-mdv-mtime': String(Math.round(st.mtimeMs)) });
+        const { body, mtimeMs } = readFile(allowed(q('path')));
+        return send(res, 200, body, { 'content-type': 'application/octet-stream', 'x-mdv-mtime': String(Math.round(mtimeMs)) });
       }
       case 'GET /api/list': {
         const real = allowed(q('path'));
@@ -318,14 +327,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
         const raw = q('path') ?? '';
         const type = IMAGE_TYPES[path.extname(raw).toLowerCase()];
         if (!type) throw new ApiError(415, 'EINVAL', L.err.notImage);
-        const real = allowed(raw);
-        let body: Buffer;
-        try {
-          if (fs.statSync(real).size > maxBytes) throw new ApiError(413, 'ETOOBIG', L.err.tooBig);
-          body = fs.readFileSync(real);
-        } catch (e) {
-          throw e instanceof ApiError ? e : fsError(e);
-        }
+        const { body } = readFile(allowed(raw));
         const headers: http.OutgoingHttpHeaders = { 'content-type': type };
         if (type === 'image/svg+xml') headers['content-security-policy'] = SVG_CSP;
         return send(res, 200, body, headers);
@@ -390,12 +392,19 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
       case 'POST /api/reveal': {
         const body = await readBody(req);
         const real = allowed(body?.path);
-        void reveal(real, platform);
+        // 탐색기를 띄우지 못하면(명령이 없거나 WSL 경로를 바꾸지 못함) 화면이 알릴 수 있게 오류로 답한다.
+        let opened = false;
+        try {
+          opened = await (opts.reveal ?? ((f: string) => reveal(f, platform)))(real);
+        } catch (e) {
+          log('warn', L.log.revealFailed(real, (e as Error)?.message ?? String(e)));
+        }
+        if (!opened) throw new ApiError(500, 'EIO', L.err.revealFailed);
         return send(res, 204, '');
       }
       case 'POST /api/log': {
         const body = await readBody(req);
-        const level: LogLevel = body?.level === 'error' ? 'error' : body?.level === 'warn' ? 'warn' : 'info';
+        const level: LogLevel = body?.level === 'error' || body?.level === 'warn' ? body.level : 'info';
         log(level, L.log.viewer(String(body?.msg ?? '').slice(0, 2000)));
         return send(res, 204, '');
       }
@@ -410,7 +419,9 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
 
   const server = http.createServer((req, res) => {
     handle(req, res).catch((e) => {
-      if (!(e instanceof ApiError)) log('error', L.log.requestFailed(req.url ?? '', (e as Error)?.message ?? String(e)));
+      // 예상한 거절(허용 폴더 밖·없는 파일 등)은 남기지 않고, 예상하지 못한 오류만 남긴다.
+      // 주소의 쿼리(토큰 t)는 로그에 남기지 않는다. 로그는 문제를 알릴 때 남에게 보일 수 있다.
+      if (!(e instanceof ApiError) || e.cause) log('error', L.log.requestFailed((req.url ?? '').split('?')[0], (e as Error)?.message ?? String(e)));
       if (res.headersSent) {
         res.end();
         return;
@@ -439,7 +450,10 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   try {
     port = await listen(preferred);
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== 'EADDRINUSE' || preferred === 0) throw e;
+    // 다른 프로그램이 쓰거나(EADDRINUSE) 쓸 수 없는 포트(EACCES: 재부팅 뒤 Windows가 예약한 포트 범위, 1024 아래 포트)면 빈 포트를 고른다.
+    // EACCES에서 멈추면 state.json의 지난 포트를 매번 먼저 시도하므로 실행기가 계속 뜨지 못한다.
+    const code = (e as NodeJS.ErrnoException).code;
+    if ((code !== 'EADDRINUSE' && code !== 'EACCES') || preferred === 0) throw e;
     port = await listen(0);
   }
   persist();

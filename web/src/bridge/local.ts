@@ -1,9 +1,9 @@
 // 파일 핸들 브리지 (SDD 4장, 6.1, 7.2). 독립 모드에서 브라우저의 파일 API로 문서를 읽는다.
 // 위치는 `mdv:/<루트 id>/<상대 경로>`. 루트 id: 폴더 핸들 d, 파일 핸들 f, 핸들 없는 파일 u, 끌어다 놓은 폴더 항목 e.
-import { isEncoding } from '../encoding';
+import { isEncoding, type Encoding } from '../encoding';
 import { normalizePath, isMarkdownPath, isTextPath } from '../render/paths';
 import { S } from '../strings';
-import { filterEntries, imageType, MAX_FILE_BYTES, toHostDoc } from './listing';
+import { filterEntries, hostError, imageType, MAX_FILE_BYTES, toHostDoc } from './listing';
 import { Emitter, HostError, type Bridge, type BridgeEvent, type DirEntry, type PathEntry, type ReadyInfo } from './types';
 
 // File System Access API 중 쓰는 부분만 적는다 (TypeScript DOM 정의에 아직 없는 것이 있다).
@@ -64,26 +64,14 @@ const POLL_MS = 1000;
 /** 끌어다 놓은 항목의 핸들을 기다리는 시간. 넘으면 옛 API(webkitGetAsEntry·File)로 연다. */
 const HANDLE_WAIT_MS = 1500;
 
-function err(code: string): HostError {
-  const msg: Record<string, string> = {
-    ENOENT: S.error.noFile,
-    EACCES: S.error.accessDenied,
-    EISDIR: S.error.isFolder,
-    ETOOBIG: S.error.tooBig,
-    ENOTSUP: S.error.notSupported,
-    EINVAL: S.error.badPath,
-  };
-  return new HostError(code, msg[code] ?? S.error.host);
-}
-
 /** 브라우저 파일 API 예외를 브리지 오류 코드로 */
 function mapError(e: unknown): HostError {
   if (e instanceof HostError) return e;
   const name = (e as { name?: string })?.name;
-  if (name === 'NotFoundError') return err('ENOENT');
-  if (name === 'NotAllowedError' || name === 'SecurityError') return err('EACCES');
-  if (name === 'TypeMismatchError') return err('EISDIR');
-  if (name === 'NotReadableError') return err('ENOTSUP');
+  if (name === 'NotFoundError') return hostError('ENOENT');
+  if (name === 'NotAllowedError' || name === 'SecurityError') return hostError('EACCES');
+  if (name === 'TypeMismatchError') return hostError('EISDIR');
+  if (name === 'NotReadableError') return hostError('ENOTSUP');
   return new HostError('EIO', (e as Error)?.message ?? String(e));
 }
 
@@ -129,13 +117,14 @@ async function oldList(dir: OldDirEntry): Promise<OldEntry[]> {
 
 export class LocalBridge implements Bridge {
   readonly mode = 'standalone' as const;
-  readonly caps = { reveal: false, fullPaths: false };
+  readonly caps = { reveal: false };
   private roots = new Map<string, Root>();
   private seq = 0;
   private events = new Emitter();
   private watched = new Map<string, { stamp: string; gone: boolean }>();
   private pollTimer: ReturnType<typeof setInterval> | null = null;
-  private images = new Map<string, string>();
+  /** 위치 → 그 그림의 blob 주소와, 만들 때 파일의 수정 시각·크기 */
+  private images = new Map<string, { stamp: string; url: string }>();
   private db: Promise<IDBDatabase | null> | null = null;
   /** 연 파일·폴더 핸들을 IndexedDB에 기억할지 (설정, SDD 8.4) */
   private remember = true;
@@ -151,9 +140,9 @@ export class LocalBridge implements Bridge {
 
   disconnect() {}
 
+  /** 다시 열 수 있는 위치: 기억하기로 한 파일·폴더 핸들(d·f 루트) */
   isRestorable(path: string): boolean {
-    const m = /^mdv:\/([df])\d+\//i.exec(path);
-    return !!m && this.remember;
+    return this.remember && /^mdv:\/[df]\d+\//i.test(path);
   }
 
   isPending(path: string): boolean {
@@ -188,18 +177,23 @@ export class LocalBridge implements Bridge {
         await this.setRemember(!!p.on);
         return {} as T;
       case 'shell.openExternal':
-        if (!/^(https?:|mailto:)/i.test(String(p.url ?? ''))) throw err('EINVAL');
+        if (!/^(https?:|mailto:)/i.test(String(p.url ?? ''))) throw hostError('EINVAL');
         window.open(p.url, '_blank', 'noopener,noreferrer');
         return {} as T;
       case 'session.restore':
-        return { restored: await this.restorePermissions() } as T;
+        return (await this.restorePermissions()) as T;
       case 'file.relocate':
-        return { path: await this.relocate(p.path, p.dir) } as T;
+        // 폴더를 훑다가 난 브라우저 파일 API 예외도 다른 메서드처럼 브리지 오류 문구로 알린다.
+        try {
+          return { path: await this.relocate(p.path, p.dir) } as T;
+        } catch (e) {
+          throw mapError(e);
+        }
       case 'app.log':
         (p.level === 'error' ? console.error : console.log)(p.msg);
         return {} as T;
       default:
-        throw err('ENOTSUP');
+        throw hostError('ENOTSUP');
     }
   }
 
@@ -208,7 +202,7 @@ export class LocalBridge implements Bridge {
   private parse(path: string): { root: Root; rel: string } {
     const m = /^mdv:\/([^/]+)\/?(.*)$/i.exec(normalizePath(String(path ?? '')));
     const root = m && this.roots.get(m[1]);
-    if (!root) throw err('ENOENT');
+    if (!root) throw hostError('ENOENT');
     return { root, rel: m[2] };
   }
 
@@ -258,9 +252,13 @@ export class LocalBridge implements Bridge {
     }
   }
 
-  /** 이미 연 폴더 안의 파일이면 그 폴더 기준 위치를, 이미 연 파일이면 그 위치를 돌려준다. */
+  /**
+   * 이미 연 폴더 안의 파일이면 그 폴더 기준 위치를, 이미 연 파일이면 그 위치를 돌려준다.
+   * 권한을 다시 받기 전인 저장된 루트는 쓰지 않는다. resolve()·isSameEntry()는 권한 없이도 맞는다고 답하지만, 그 루트로는 읽을 수 없다.
+   */
   private async addFileHandle(h: FsFile): Promise<string> {
     for (const r of this.roots.values()) {
+      if (r.locked) continue;
       try {
         if (r.kind === 'dir' && r.dir) {
           const segs = await r.dir.resolve(h);
@@ -269,7 +267,7 @@ export class LocalBridge implements Bridge {
           return `mdv:/${r.id}/${r.name}`;
         }
       } catch {
-        // 권한이 없는 저장된 루트는 건너뛴다.
+        // 비교하지 못한 루트(핸들이 가리키던 항목이 사라짐 등)는 건너뛰고 새 루트로 연다.
       }
     }
     const id = this.nextId('f');
@@ -279,7 +277,7 @@ export class LocalBridge implements Bridge {
 
   private async addDirHandle(h: FsDir): Promise<string> {
     for (const r of this.roots.values()) {
-      if (r.kind === 'dir' && r.dir && (await r.dir.isSameEntry(h).catch(() => false))) return `mdv:/${r.id}/`;
+      if (r.kind === 'dir' && r.dir && !r.locked && (await r.dir.isSameEntry(h).catch(() => false))) return `mdv:/${r.id}/`;
     }
     return this.addRoot({ id: this.nextId('d'), kind: 'dir', name: h.name, dir: h });
   }
@@ -305,11 +303,11 @@ export class LocalBridge implements Bridge {
 
   private async fileHandleAt(root: Root, rel: string): Promise<FsFile> {
     if (root.kind === 'file') {
-      if (rel !== root.name || !root.file) throw err('ENOENT');
+      if (rel !== root.name || !root.file) throw hostError('ENOENT');
       return root.file;
     }
     const segs = rel.split('/').filter(Boolean);
-    if (!segs.length) throw err('EISDIR');
+    if (!segs.length) throw hostError('EISDIR');
     let dir = root.dir!;
     for (const s of segs.slice(0, -1)) dir = await dir.getDirectoryHandle(s);
     return dir.getFileHandle(segs[segs.length - 1]);
@@ -322,16 +320,16 @@ export class LocalBridge implements Bridge {
       if (root.kind === 'dir' || root.kind === 'file') return await (await this.fileHandleAt(root, rel)).getFile();
       if (root.kind === 'entry') return await oldFile((await oldChild(root.entry!, rel, false)) as OldFileEntry);
       const f = root.files?.get(rel);
-      if (!f) throw err('ENOENT');
+      if (!f) throw hostError('ENOENT');
       return f;
     } catch (e) {
       throw mapError(e);
     }
   }
 
-  private async read(path: string, encoding?: Parameters<typeof toHostDoc>[3]) {
+  private async read(path: string, encoding?: Encoding) {
     const file = await this.fileAt(path);
-    if (file.size > MAX_FILE_BYTES) throw err('ETOOBIG');
+    if (file.size > MAX_FILE_BYTES) throw hostError('ETOOBIG');
     let bytes: Uint8Array;
     try {
       bytes = new Uint8Array(await file.arrayBuffer());
@@ -369,7 +367,7 @@ export class LocalBridge implements Bridge {
     } catch (e) {
       throw mapError(e);
     }
-    throw err('ENOENT');
+    throw hostError('ENOENT');
   }
 
   imageUrl(): string | null {
@@ -381,11 +379,13 @@ export class LocalBridge implements Bridge {
     if (!type) return null;
     try {
       const file = await this.fileAt(path);
-      const key = `${path}\n${file.lastModified}\n${file.size}`;
-      const cached = this.images.get(key);
-      if (cached) return cached;
+      const stamp = `${file.lastModified}:${file.size}`;
+      const cached = this.images.get(path);
+      if (cached?.stamp === stamp) return cached.url;
       const url = URL.createObjectURL(new Blob([await file.arrayBuffer()], { type }));
-      this.images.set(key, url);
+      // 그림이 바뀌었으면 옛 사본을 놓아준다. 위치마다 사본 하나만 메모리에 둔다 (NFR-PERF-06).
+      if (cached) URL.revokeObjectURL(cached.url);
+      this.images.set(path, { stamp, url });
       return url;
     } catch {
       return null;
@@ -402,8 +402,9 @@ export class LocalBridge implements Bridge {
       return segs ? `mdv:/${target.id}/${segs.join('/')}` : null;
     }
     // 그 밖(핸들 없는 파일, input으로 고른 폴더): 고른 폴더에서 이름과 크기가 같은 파일을 하나 찾으면 그것으로 본다.
-    const file =
-      root.kind === 'file' && root.file ? await root.file.getFile().catch(() => null) : root.kind === 'mem' && !root.folder ? root.files?.get(rel) : undefined;
+    let file: File | null | undefined;
+    if (root.kind === 'file' && root.file) file = await root.file.getFile().catch(() => null);
+    else if (root.kind === 'mem' && !root.folder) file = root.files?.get(rel);
     if (!file) return null;
     let hits: string[] = [];
     if (target.kind === 'dir' && target.dir) hits = await findByNameSize(target.dir, file.name, file.size);
@@ -621,19 +622,26 @@ export class LocalBridge implements Bridge {
     }
   }
 
-  /** 저장된 핸들에 읽기 권한을 다시 받는다. 사용자 클릭 처리기 안에서 불러야 한다. */
-  private async restorePermissions(): Promise<number> {
-    let n = 0;
+  /**
+   * 저장된 핸들에 읽기 권한을 다시 받는다. 사용자 클릭 처리기 안에서 불러야 한다.
+   * 거절했거나 요청이 실패한(클릭의 사용자 활성화가 지나 SecurityError 등) 루트 수를 remaining으로 알려, 다시 시도할 수 있게 한다.
+   */
+  private async restorePermissions(): Promise<{ restored: number; remaining: number }> {
+    let restored = 0;
     for (const r of this.roots.values()) {
       if (!r.locked) continue;
       const h = r.dir ?? r.file;
       const state = await h?.requestPermission?.({ mode: 'read' }).catch(() => 'denied');
       if (state === 'granted') {
         r.locked = false;
-        n++;
+        restored++;
       }
     }
-    return n;
+    return { restored, remaining: this.lockedCount() };
+  }
+
+  private lockedCount(): number {
+    return [...this.roots.values()].filter((r) => r.locked).length;
   }
 
   private async ready(): Promise<ReadyInfo> {
@@ -652,7 +660,7 @@ export class LocalBridge implements Bridge {
       session: get('mdv.session'),
       version: __MDV_VERSION__,
       roots: [],
-      restorable: [...this.roots.values()].filter((r) => r.locked).length,
+      restorable: this.lockedCount(),
     };
   }
 }

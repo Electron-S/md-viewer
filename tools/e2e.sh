@@ -8,7 +8,11 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 DISTRO=${WSL_DISTRO_NAME:?WSL 안에서 실행하세요}
 NODE=$(command -v node)
-[ -f dist/viewer.html ] && [ -f dist/mdview/mdview.mjs ] || node tools/build.mjs
+# 빌드 결과가 없거나 소스보다 오래됐으면 다시 빌드한다. 고친 코드 대신 지난 빌드를 시험하지 않게 한다.
+if [ ! -f dist/viewer.html ] || [ ! -f dist/mdview/mdview.mjs ] ||
+  [ -n "$(find web launcher skill tools/build.mjs package.json -newer dist/viewer.html -print -quit)" ]; then
+  node tools/build.mjs
+fi
 WIN_LOCAL=$(wslpath -u "$(cd /mnt/c && cmd.exe /c 'echo %LOCALAPPDATA%' 2>/dev/null | tr -d '\r')")
 WIN_TEMP=$(wslpath -u "$(cd /mnt/c && cmd.exe /c 'echo %TEMP%' 2>/dev/null | tr -d '\r')")
 PY=$(ls "$WIN_LOCAL"/Packages/PythonSoftwareFoundation.Python.*/LocalCache/Local/MdViewer-dev/venv/Scripts/python.exe "$WIN_LOCAL"/MdViewer-dev/venv/Scripts/python.exe 2>/dev/null | head -1 || true)

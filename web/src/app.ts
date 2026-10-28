@@ -63,7 +63,7 @@ export class App {
   private md = createMarkdown();
   private sanitizer = createSanitizer(window);
   readonly preview = new PreviewView();
-  /** 원문 보기는 처음 쓸 때 불러온다 (시작 번들을 줄여 NFR-PERF-01을 맞춘다). */
+  /** 원문 보기는 처음 쓸 때 실행한다 (시작할 때 CodeMirror를 실행하지 않아 NFR-PERF-01을 맞춘다, loadSourceBundle 참고). */
   source: SourceView | null = null;
   private sourceLoading: Promise<SourceView> | null = null;
   private toc = new TocPanel();
@@ -125,7 +125,7 @@ export class App {
     this.applyZoom();
     this.applySidePanel();
     this.claimSession();
-    void this.bridge.request('handles.remember', { on: this.settings.rememberHandles }).catch(() => {});
+    this.applyRememberHandles();
     if (this.session.workspace) this.workspace.setRoot(this.session.workspace);
 
     const args = ready.args ?? [];
@@ -165,11 +165,16 @@ export class App {
 
   /** 세션은 마지막으로 쓴(보고 있는) 뷰어 탭만 저장한다. 여러 탭이 같은 저장소를 번갈아 덮지 않게 한다. */
   private claimSession() {
+    let prev: string | null = null;
     try {
+      prev = localStorage.getItem('mdv.sessionOwner');
       localStorage.setItem('mdv.sessionOwner', this.viewerId);
     } catch {
       // 저장소가 없으면 세션도 없다.
+      return;
     }
+    // 다른 뷰어 탭이 저장한 세션을 이 탭의 상태로 덮는다. 읽기만 하고 닫아도 다음에 이 탭의 문서가 열리게 한다.
+    if (this.started && prev !== this.viewerId) this.saveSession.trigger();
   }
 
   private ownsSession(): boolean {
@@ -220,8 +225,9 @@ export class App {
     this.bridge.disconnect();
     void this.bridge.request('watch.set', { paths: [] }).catch(() => {});
     window.close();
-    // 스크립트로 닫을 수 없는 탭이면 물러났다는 안내만 남긴다.
+    // 스크립트로 닫을 수 없는 탭이면 물러났다는 안내만 남긴다. 메뉴·탭 줄도 감춰 이 탭에서 문서를 더 열지 않게 한다.
     for (const t of [...this.tabs.tabs]) this.tabs.close(t.id);
+    for (const id of ['menubar', 'tabbar', 'side', 'resizer', 'statusbar']) $(id).hidden = true;
     this.viewsEl.hidden = true;
     this.emptyEl.hidden = false;
     this.emptyEl.replaceChildren(Object.assign(document.createElement('p'), { className: 'retired', textContent: S.retired.text }));
@@ -273,7 +279,7 @@ export class App {
 
   private bindEvents() {
     window.addEventListener('keydown', (e) => {
-      if (document.querySelector('dialog[open]')) return;
+      if (this.retired || document.querySelector('dialog[open]')) return;
       if (this.menubar.handleKeyDown(e)) return;
       this.cmds.handleKey(e);
     }, true);
@@ -296,6 +302,7 @@ export class App {
     document.addEventListener('drop', (e) => {
       if (!e.dataTransfer?.types.includes('Files')) return;
       e.preventDefault();
+      if (this.retired) return;
       // 끌어다 놓은 항목은 이 처리기 안에서만 꺼낼 수 있다.
       void this.bridge
         .takeDrop(e.dataTransfer)
@@ -572,7 +579,8 @@ export class App {
     this.stashShown();
     if (r.message) this.preview.setMessage(r.message.text, r.message.action);
     else this.preview.setContent(r.frag!);
-    this.preview.setNotice(r.needsFolder ? { text: S.preview.needFolder, action: { label: S.preview.openFolder, run: () => void this.openFolderForActive() } } : null);
+    const openFolder = () => void this.openFolderForActive().catch((err) => this.reportError(err));
+    this.preview.setNotice(r.needsFolder ? { text: S.preview.needFolder, action: { label: S.preview.openFolder, run: openFolder } } : null);
     this.shown = { docId: r.docId, version: r.version, allowRemote: r.allowRemote };
   }
 
@@ -588,15 +596,12 @@ export class App {
     }
   }
 
-  /** 단독 파일로 연 문서를 그 문서가 든 폴더 기준으로 다시 연다 (SDD 7.2-6). */
+  /** 단독 파일로 연 문서를 그 문서가 든 폴더 기준으로 다시 연다 (SDD 7.2-6). 대화상자·옮기기 오류는 부른 쪽이 알린다. */
   private async openFolderForActive() {
     const tab = this.tabs.active();
     const doc = this.activeDoc();
     if (!tab || !doc) return;
-    const r = await this.bridge.request<{ path: string | null }>('dialog.openFolder').catch((err) => {
-      this.reportError(err);
-      return { path: null };
-    });
+    const r = await this.bridge.request<{ path: string | null }>('dialog.openFolder');
     if (!r.path) return;
     this.setWorkspace(r.path, true);
     const moved = await this.bridge.request<{ path: string | null }>('file.relocate', { path: doc.path, dir: r.path });
@@ -725,10 +730,18 @@ export class App {
       await this.bridge.request('shell.openExternal', { url: a.url }).catch((err) => this.reportError(err));
     } else if (isViewablePath(a.path)) {
       await this.openFile(a.path, { fragment: a.fragment });
-    } else {
+    } else if (this.canReveal(a.path)) {
       // 문서가 아닌 로컬 파일은 실행하지 않고 탐색기에서 위치만 보여준다 (SRS 4.3).
       await this.bridge.request('shell.reveal', { path: a.path }).catch((err) => this.reportError(err));
+    } else {
+      // 탐색기를 띄울 수 없는 위치(독립 모드, 브라우저 핸들로 연 파일)는 열지 않는다는 것만 알린다.
+      toast(S.toast.notViewable(basename(a.path)));
     }
+  }
+
+  /** 탐색기에서 위치를 열 수 있는지: 실행기 모드의 OS 경로만 (FR-INFO-03) */
+  private canReveal(path: string): boolean {
+    return this.bridge.caps.reveal && !/^mdv:/i.test(path);
   }
 
   // ------------------------------------------------------------------ 찾기
@@ -861,10 +874,12 @@ export class App {
       const li = document.createElement('li');
       const b = document.createElement('button');
       b.className = 'link-button';
+      // 독립 모드의 위치(mdv:/d1/…)는 메뉴·탭 줄처럼 화면용 이름으로 보인다.
+      const shown = this.bridge.displayPath(p);
       b.textContent = basename(p);
-      b.title = p;
+      b.title = shown;
       b.addEventListener('click', () => void this.openFile(p));
-      li.append(b, Object.assign(document.createElement('span'), { className: 'recent-dir', textContent: p }));
+      li.append(b, Object.assign(document.createElement('span'), { className: 'recent-dir', textContent: shown }));
       list.append(li);
     }
     $('empty-recent-title').hidden = !this.session.recentFiles.length;
@@ -873,8 +888,9 @@ export class App {
 
   /** 독립 모드: 저장해 둔 핸들에 권한을 다시 받아 지난 세션을 연다 (SDD 7.4). 클릭 처리기에서 부른다. */
   private async restoreSession() {
-    const r = await this.bridge.request<{ restored: number }>('session.restore');
-    this.restorable = 0;
+    const r = await this.bridge.request<{ restored: number; remaining: number }>('session.restore');
+    // 거절·실패한 위치가 남으면 복원 버튼·메뉴를 남겨 다시 시도하게 한다.
+    this.restorable = r.remaining;
     if (!r.restored) {
       toast(S.toast.restoreNone);
       this.renderRecentList();
@@ -882,7 +898,9 @@ export class App {
     }
     if (this.session.workspace) this.workspace.setRoot(this.session.workspace);
     await this.restoreTabs(this.session);
-    const t = this.tabs.tabs[this.session.activeIndex];
+    // 일부 위치만 권한을 받았으면 탭 순서가 세션과 달라지므로, 번호가 아니라 위치로 지난 활성 탭을 찾는다.
+    const activePath = this.session.tabs[this.session.activeIndex]?.path;
+    const t = activePath ? this.tabs.byDoc(docKey(activePath)) : undefined;
     if (t) this.tabs.activate(t.id);
     this.updateWatch();
     if (!this.tabs.active()) this.renderRecentList();
@@ -898,12 +916,15 @@ export class App {
     // 독립 모드: 권한을 다시 받지 못해 아직 못 연 지난 세션의 탭은 "이전 문서 다시 열기"를 누를 때까지 남겨 둔다.
     // 그러지 않으면 열자마자 빈 세션이 저장돼, 복원하기 전에 새로 고치면 지난 탭을 잃는다.
     const pending = this.session.tabs.filter((t) => this.bridge.isPending(t.path) && !live.some((x) => docKey(x.path) === docKey(t.path)));
-    const active = tabs.findIndex((t) => t.id === this.tabs.activeId);
+    // 열린 탭이 없으면 권한을 기다리는 지난 활성 탭을 가리킨다.
+    const active = live.length
+      ? tabs.findIndex((t) => t.id === this.tabs.activeId)
+      : pending.indexOf(this.session.tabs[this.session.activeIndex]);
     return {
       ...this.session,
       schemaVersion: SCHEMA_VERSION,
       tabs: [...live, ...pending],
-      activeIndex: active >= 0 || live.length ? Math.max(0, active) : Math.max(0, pending.indexOf(this.session.tabs[this.session.activeIndex])),
+      activeIndex: Math.max(0, active),
       workspace: this.session.workspace && keep(this.session.workspace) ? this.session.workspace : null,
       recentFiles: this.session.recentFiles.filter(keep),
       recentFolders: this.session.recentFolders.filter(keep),
@@ -919,6 +940,11 @@ export class App {
   private persistSettings() {
     const data = { ...this.settings, schemaVersion: SCHEMA_VERSION };
     void this.bridge.request('store.save', { name: 'settings', data: JSON.stringify(data, null, 2) }).catch((err) => this.logError(String(err)));
+  }
+
+  /** 연 파일·폴더 핸들을 브라우저 저장소에 기억할지 브리지에 알린다 (SDD 8.4). */
+  private applyRememberHandles() {
+    void this.bridge.request('handles.remember', { on: this.settings.rememberHandles }).catch((err) => this.logError(String(err)));
   }
 
   private reportError(err: unknown) {
@@ -1008,7 +1034,7 @@ export class App {
     });
     c.register({ id: 'file.copyPath', title: S.cmd.fileCopyPath, enabled: hasTab, run: () => this.copyText(this.bridge.displayPath(this.activeDoc()!.path)) });
     c.register({
-      id: 'file.reveal', title: S.cmd.fileReveal, enabled: () => hasTab() && this.bridge.caps.reveal && !/^mdv:/i.test(this.activeDoc()!.path),
+      id: 'file.reveal', title: S.cmd.fileReveal, enabled: () => hasTab() && this.canReveal(this.activeDoc()!.path),
       run: () => this.bridge.request('shell.reveal', { path: this.activeDoc()!.path }),
     });
     c.register({ id: 'file.print', title: S.cmd.filePrint, keys: ['Ctrl+P'], enabled: hasTab, run: () => this.print() });
@@ -1069,7 +1095,7 @@ export class App {
       id: 'view.rememberHandles', title: S.cmd.rememberHandles, checked: () => this.settings.rememberHandles,
       run: () => {
         this.settings.rememberHandles = !this.settings.rememberHandles;
-        void this.bridge.request('handles.remember', { on: this.settings.rememberHandles });
+        this.applyRememberHandles();
         this.saveSettings.trigger();
         this.saveSession.trigger();
       },

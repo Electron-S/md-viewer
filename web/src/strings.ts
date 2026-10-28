@@ -83,12 +83,13 @@ const ko = {
   picker: { documents: 'Markdown·텍스트 문서' },
 
   toast: {
-    hostInitFailed: (msg: string) => `호스트 초기화 실패: ${msg}`,
+    hostInitFailed: (msg: string) => `뷰어를 시작하지 못했습니다: ${msg}`,
     cannotOpen: (name: string, msg: string) => `열 수 없습니다: ${name} — ${msg}`,
     copied: '복사했습니다',
     notInFolder: '고른 폴더에 이 문서가 없습니다. 문서가 든 폴더를 고르세요.',
     restoreNone: '다시 열 수 있는 문서가 없습니다.',
     notYet: '이 단축키의 기능은 다음 버전에서 지원합니다.',
+    notViewable: (name: string) => `문서가 아닌 파일은 뷰어에서 열지 않습니다: ${name}`,
   },
 
   preview: {
@@ -148,7 +149,7 @@ const ko = {
   tab: {
     deletedTooltip: '(디스크에서 삭제됨)',
     deletedSuffix: ' (삭제됨)',
-    closeTooltip: '탭 닫기 (Ctrl+W)',
+    closeTooltip: '탭 닫기 (Alt+W)',
     close: '탭 닫기',
   },
 
@@ -162,11 +163,10 @@ const ko = {
     badPath: '열 수 없는 위치입니다',
     offline: '실행기에 연결할 수 없습니다. mdview로 다시 열어 주세요.',
     sourceModuleMissing: '원문 보기 모듈이 없습니다',
-    sourceModuleLoad: '원문 보기 모듈을 불러오지 못했습니다',
     missingElement: (id: string) => `#${id} 없음`,
   },
 
-  /** 호스트 로그로 보내는 화면 오류 */
+  /** 로그(실행기 모드는 실행기 로그, 독립 모드는 브라우저 콘솔)로 보내는 화면 오류 */
   log: {
     restoreFailed: (msg: string) => `세션 복원 실패: ${msg}`,
     reloadFailed: (path: string, msg: string) => `다시 읽기 실패: ${path} ${msg}`,

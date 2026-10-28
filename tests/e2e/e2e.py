@@ -215,7 +215,8 @@ def prepare_standalone_docs():
 # ---------------------------------------------------------------- 실행기 조종 (wsl.exe)
 
 def wsl(*cmd, timeout=60):
-    p = subprocess.run(['wsl.exe', '-d', DISTRO, '-e', *map(str, cmd)], capture_output=True, timeout=timeout)
+    # WSL 안 명령의 출력은 UTF-8이지만 wsl.exe 자신의 오류 문구는 기본이 UTF-16LE다. WSL_UTF8=1로 그것도 UTF-8로 받는다.
+    p = subprocess.run(['wsl.exe', '-d', DISTRO, '-e', *map(str, cmd)], capture_output=True, timeout=timeout, env={**os.environ, 'WSL_UTF8': '1'})
     return p.returncode, p.stdout.decode('utf-8', 'replace').replace('\r', ''), p.stderr.decode('utf-8', 'replace').replace('\r', '')
 
 
@@ -1208,7 +1209,8 @@ def main():
             try:
                 guard('NFR-PERF-01', '시작 시간', lambda: run_startup(pw, ctx))  # 무거운 시나리오 전에 잰다
                 guard('NFR-PERF-06', '메모리', lambda: run_memory(pw, ctx))
-                run_launcher(pw, main_launcher, ctx)
+                # 실행기가 뜨지 못하는 등으로 예외가 나도 실패로 기록하고 나머지 시나리오와 결과 기록을 잇는다.
+                guard('FR-LAUNCH-01', '실행기 모드', lambda: run_launcher(pw, main_launcher, ctx))
                 guard('NFR-SEC-02', '실행기 거부 요청', lambda: run_security(main_launcher))
                 guard('FR-SESS-01', '탭 10개 세션 복원', lambda: run_session10(pw, ctx))
                 guard('FR-LAUNCH-03', '유휴 종료', lambda: run_idle(pw, ctx))

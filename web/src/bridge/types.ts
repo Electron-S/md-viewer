@@ -52,8 +52,6 @@ export interface ReadyInfo {
 export interface Capabilities {
   /** 탐색기에서 파일 위치 열기 (실행기 모드) */
   reveal: boolean;
-  /** OS 경로를 그대로 보여줄 수 있음 */
-  fullPaths: boolean;
 }
 
 export type BridgeEvent = 'file.changed' | 'file.deleted' | 'bridge.offline' | 'bridge.online';

@@ -9,7 +9,7 @@ export interface SanitizeContext {
   allowRemoteImages: boolean;
   /** 로컬 이미지 주소를 브리지가 만든다. null이면 data-mdv-src만 남기고 그린 뒤에 채운다 (SDD 8.1). */
   imageUrl: (path: string) => string | null;
-  /** 이 페이지의 origin. 문서가 직접 쓴 같은 origin 주소는 지운다 (SDD 8.4). */
+  /** 이 페이지의 origin. 문서가 직접 쓴 이 origin의 이미지 주소는 지운다. 링크는 눌러야 열리므로 둔다 (SDD 8.4). */
   selfOrigin?: string;
 }
 

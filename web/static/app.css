@@ -153,8 +153,8 @@ button:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--accent
 .source-wrap .cm-editor { height: 100%; }
 .source-wrap .cm-editor.cm-focused { outline: none; }
 .preview-scroll { flex: 1; overflow: auto; min-height: 0; outline: none; }
-.preview-notice { position: sticky; top: 0; z-index: 2; display: flex; gap: 12px; align-items: center; padding: 8px 16px; background: var(--bg-chrome); border-bottom: 1px solid var(--line); font-size: 13px; }
-.preview-notice[hidden] { display: none; }
+/* 문서와 함께 스크롤한다. 위에 붙여 두면 제목·줄로 옮긴 위치(스크롤 영역 맨 위)를 가린다. */
+.preview-notice { display: flex; gap: 12px; align-items: center; padding: 8px 16px; background: var(--bg-chrome); border-bottom: 1px solid var(--line); font-size: 13px; }
 .preview-notice button { font: inherit; padding: 3px 10px; border-radius: 4px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); cursor: pointer; }
 
 #empty { flex: 1; display: flex; align-items: center; justify-content: center; overflow: auto; }
@@ -199,5 +199,5 @@ button:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--accent
 /* 인쇄 (FR-EXP-01): 미리보기만 인쇄한다. */
 @media print {
   html, body, #app, #body, #main, #views, .pane.preview, .preview-scroll { display: block !important; height: auto !important; overflow: visible !important; }
-  #menubar, #tabbar, #side, #resizer, #statusbar, #find-slot, #empty, .pane.source, .toast-box { display: none !important; }
+  #menubar, #tabbar, #side, #resizer, #statusbar, #find-slot, #empty, .pane.source, .toast-box, .preview-notice { display: none !important; }
 }

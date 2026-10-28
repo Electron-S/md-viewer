@@ -33,6 +33,9 @@ test('GFM: 표, 작업 목록, 취소선, 자동 링크 (FR-REN-01)', () => {
   assert.match(html, /<a href="https:\/\/example\.org">/);
   assert.doesNotMatch(renderMarkdown(md, 'README.md 파일').html, /<a /, '파일 이름은 링크가 아니다');
   assert.match(renderMarkdown(md, '(www.example.com/a_(b))!').html, /href="http:\/\/www\.example\.com\/a_\(b\)"/);
+  // 태그 필터는 닫는 태그에도 적용된다(cmark-gfm과 같다). 닫는 태그만 남아 정제에서 사라지지 않게 한다.
+  assert.match(renderMarkdown(md, 'a <title>t</title> b').html, /a &lt;title>t&lt;\/title> b/);
+  assert.match(renderMarkdown(md, '<script>\nx\n</script>\n').html, /&lt;script>\nx\n&lt;\/script>/);
 });
 
 test('각주와 제목 앵커 (FR-REN-05)', () => {

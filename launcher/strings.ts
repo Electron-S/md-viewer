@@ -35,6 +35,8 @@ const ko = {
   badPort: (v: string) => `포트 번호가 아닙니다: ${v}`,
   serverFailed: (log: string) => `실행기를 시작하지 못했습니다. 로그를 확인하세요: ${log}`,
   stopped: '실행기를 멈췄습니다.',
+  stopFailed: (msg: string) => `실행기를 멈추지 못했습니다: ${msg}`,
+  rootFailed: (root: string, msg: string) => `허용 폴더를 등록하지 못했습니다: ${root} (${msg})`,
   notRunning: '실행 중인 실행기가 없습니다.',
   status: (port: number, pid: number) => `실행 중: 127.0.0.1:${port} (pid ${pid})`,
   installed: (dir: string) => `Claude Code 스킬을 설치했습니다: ${dir}`,
@@ -61,6 +63,7 @@ const ko = {
     denied: '접근 권한이 없습니다',
     internal: '실행기 내부 오류',
     viewerMissing: 'viewer.html이 없습니다',
+    revealFailed: '탐색기에서 파일 위치를 열지 못했습니다',
   },
 
   // ---- 로그
@@ -73,8 +76,11 @@ const ko = {
     requestFailed: (url: string, msg: string) => `요청 처리 오류 ${url}: ${msg}`,
     watchFallback: (dir: string, msg: string) => `폴더 감시를 만들지 못해 폴링으로 대신함: ${dir} ${msg}`,
     rootAdded: (root: string) => `허용 폴더 추가: ${root}`,
+    revealFailed: (file: string, msg: string) => `파일 위치 열기 실패: ${file} ${msg}`,
+    viewerFailed: (file: string, msg: string) => `뷰어 HTML을 읽지 못함: ${file} ${msg}`,
     viewer: (msg: string) => `[뷰어] ${msg}`,
     uncaught: (msg: string) => `처리되지 않은 오류: ${msg}`,
+    badEnv: (name: string, value: string) => `환경 변수 값이 올바르지 않아 기본값을 씀: ${name}=${value}`,
   },
 };
 

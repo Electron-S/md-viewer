@@ -85,8 +85,15 @@ export function browserCommands(url: string, p: Platform): Command[] {
   return out;
 }
 
-/** 명령을 분리된 프로세스로 띄운다. 명령이 없으면(ENOENT) false. */
-function launch([cmd, args]: Command): Promise<boolean> {
+/** 브라우저를 여는 명령이 이 시간 안에 끝나면 종료 코드로 성공을 가린다. 더 오래 돌면(브라우저를 직접 띄운 xdg-open 등) 연 것으로 본다. */
+const OPEN_GRACE_MS = 1000;
+
+/**
+ * 명령을 분리된 프로세스로 띄운다. 명령이 없으면(ENOENT) false.
+ * graceMs를 주면 그 시간 안에 0이 아닌 코드로 끝나도 false다(화면·브라우저가 없어 xdg-open이 실패한 경우 등).
+ * 종료 코드를 믿을 수 없는 명령(explorer.exe는 성공해도 1)에는 주지 않는다.
+ */
+export function launch([cmd, args]: Command, graceMs = 0): Promise<boolean> {
   return new Promise((resolve) => {
     let child;
     try {
@@ -98,7 +105,16 @@ function launch([cmd, args]: Command): Promise<boolean> {
     child.once('error', () => resolve(false));
     child.once('spawn', () => {
       child.unref();
-      resolve(true);
+      if (!graceMs) {
+        resolve(true);
+        return;
+      }
+      // 타이머는 unref하지 않는다. 기다리는 동안 명령(부른 쪽)이 먼저 끝나 주소를 내지 못하는 일을 막는다.
+      const timer = setTimeout(() => resolve(true), graceMs);
+      child.once('exit', (code) => {
+        clearTimeout(timer);
+        resolve(code === 0);
+      });
     });
   });
 }
@@ -139,8 +155,11 @@ export async function waitWindowsReachable(port: number, timeoutMs = 5000, run: 
   }
 }
 
+/** 열지 못하면 false. 실행기는 그때 "브라우저를 열지 못했습니다"를 내고, 스킬은 그 문구를 보고 주소를 알린다. */
 export async function openBrowser(url: string, p: Platform = currentPlatform()): Promise<boolean> {
-  for (const c of browserCommands(url, p)) if (await launch(c)) return true;
+  // macOS·Linux의 open·xdg-open은 열지 못하면 바로 실패 코드로 끝난다. Windows 쪽 명령(rundll32)은 종료 코드를 보지 않는다.
+  const grace = p.wsl || p.platform === 'win32' ? 0 : OPEN_GRACE_MS;
+  for (const c of browserCommands(url, p)) if (await launch(c, grace)) return true;
   return false;
 }
 

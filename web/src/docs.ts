@@ -3,7 +3,7 @@ import type { Encoding } from './encoding';
 import { docKey } from './render/paths';
 
 export type { HostDoc } from './bridge/types';
-export type { Encoding, Eol } from './encoding';
+export type { Encoding } from './encoding';
 
 /** 문서 모델 (SDD 5.1, ARCH-01·06) */
 export interface DocModel extends HostDoc {
