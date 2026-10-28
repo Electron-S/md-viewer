@@ -11,7 +11,7 @@ import {
 import { TabManager, type Tab, type ViewMode } from './tabs';
 import { TocPanel } from './panels/toc';
 import { WorkspacePanel } from './panels/workspace';
-import { PreviewView, type LinkAction } from './views/preview';
+import { chunkBlocks, PreviewView, type LinkAction } from './views/preview';
 import type { SourceView } from './views/source';
 import { ScrollSync } from './views/sync';
 import type { FindQuery, FindStatus } from './views/find';
@@ -654,13 +654,14 @@ export class App {
         const out = renderMarkdown(this.md, doc.text);
         r.headings = out.headings;
         for (const e of out.errors) this.logError(S.log.blockFailed(doc.path, e.line, e.message));
-        r.frag = this.sanitizer.sanitize(out.html, {
+        const clean = this.sanitizer.sanitize(out.html, {
           docDir: dirname(doc.path),
           docRoot: this.bridge.rootOf(doc.path),
           allowRemoteImages: allowRemote,
           imageUrl: (p) => this.bridge.imageUrl(p),
           selfOrigin: /^https?:/.test(location.protocol) ? location.origin : undefined,
         });
+        r.frag = chunkBlocks(clean);
         this.loadImages(r.frag);
         r.needsFolder = !this.bridge.canResolveRelative(doc.path) && !!r.frag.querySelector('img[data-mdv-src], a[data-mdv-path]');
       } catch (err) {

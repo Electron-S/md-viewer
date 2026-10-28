@@ -7,7 +7,7 @@ import { parseSession, parseSettings, pushRecent, Debouncer } from '../src/sessi
 import { buildRegex, findRanges } from '../src/views/find';
 import { TabManager } from '../src/tabs';
 import { DocStore, countChars, countLines, countWords, encodingLabel, type HostDoc } from '../src/docs';
-import { PreviewView } from '../src/views/preview';
+import { chunkBlocks, PreviewView } from '../src/views/preview';
 import type { SourceView } from '../src/views/source';
 import { ScrollSync } from '../src/views/sync';
 import { MenuBar } from '../src/ui/menubar';
@@ -213,6 +213,72 @@ test('미리보기 찾기: 일치 표시·순환·해제 (FR-FIND-03)', () => {
   v.clearFind();
   assert.equal(v.article.querySelectorAll('mark').length, 0);
   assert.equal(v.article.textContent, '사과 바나나 사과 포도사과');
+});
+
+/** 원문 줄 data-line = 0, 1, 2 …인 최상위 블록들. 블록 사이에는 렌더러처럼 줄 바꿈 글자를 둔다. */
+function blocks(tags: string[]): DocumentFragment {
+  const doc = dom.window.document;
+  const f = doc.createDocumentFragment();
+  tags.forEach((t, i) => {
+    const el = doc.createElement(t);
+    el.setAttribute('data-line', String(i));
+    f.append(el, doc.createTextNode('\n'));
+  });
+  return f as unknown as DocumentFragment;
+}
+
+const chunkSizes = (f: DocumentFragment) => Array.from(f.children).map((c) => c.children.length);
+
+test('미리보기 묶음: 블록 64개씩 묶되 제목·구분선 앞에서는 자르지 않는다 (NFR-PERF-02)', () => {
+  const a = chunkBlocks(blocks(Array(150).fill('p')));
+  assert.deepEqual(chunkSizes(a), [64, 64, 22]);
+  assert.ok(Array.from(a.children).every((c) => c.className === 'mdv-chunk'));
+  assert.ok(Array.from(a.children).every((c) => !c.hasAttribute('style')), '미리보기에 style 속성을 만들지 않는다 (NFR-SEC-01)');
+  assert.deepEqual(Array.from(a.querySelectorAll('[data-line]')).map((e) => Number(e.getAttribute('data-line'))), [...Array(150).keys()]);
+  assert.equal(a.textContent, '\n'.repeat(150), '블록 사이 글자도 순서대로 남는다');
+
+  // 묶음은 여백이 밖으로 겹치지 않으므로, 위 여백이 있는 제목·구분선이 묶음 첫 블록이 되지 않게 한 칸씩 미룬다.
+  const tags = Array(130).fill('p');
+  tags[64] = 'h2';
+  tags[65] = 'hr';
+  assert.deepEqual(chunkSizes(chunkBlocks(blocks(tags))), [66, 64]);
+  // 제목만 이어지면 두 배에서 자른다.
+  assert.deepEqual(chunkSizes(chunkBlocks(blocks(Array(200).fill('h3')))), [128, 72]);
+  assert.equal(chunkBlocks(blocks([])).childNodes.length, 0);
+});
+
+test('미리보기 줄 위치: 묶은 문서에서도 줄과 스크롤 위치를 맞바꾸고, 필요한 묶음의 블록만 잰다 (ARCH-03, NFR-PERF-02)', () => {
+  const v = new PreviewView();
+  // 블록 i: 원문 줄 2i, 문서 위치 100 + 20i
+  const doc = blocks(Array(200).fill('p'));
+  doc.querySelectorAll('p').forEach((p, i) => p.setAttribute('data-line', String(2 * i)));
+  v.setContent(chunkBlocks(doc));
+  let scroll = 0;
+  Object.defineProperty(v.el, 'scrollTop', { get: () => scroll, set: (y: number) => (scroll = y), configurable: true });
+  const rect = (top: number) => ({ top, bottom: top, left: 0, right: 0, width: 0, height: 0, x: 0, y: top, toJSON() {} }) as DOMRect;
+  v.el.getBoundingClientRect = () => rect(0);
+  const ps = Array.from(v.article.querySelectorAll('p'));
+  const measured = new Set<number>();
+  ps.forEach((p, i) => {
+    p.getBoundingClientRect = () => {
+      measured.add(i);
+      return rect(100 + 20 * i - scroll);
+    };
+  });
+  for (const c of Array.from(v.article.children)) {
+    const first = ps.indexOf(c.firstElementChild as HTMLParagraphElement);
+    c.getBoundingClientRect = () => rect(100 + 20 * first - scroll);
+  }
+
+  scroll = 100 + 20 * 150 + 10; // 블록 150(줄 300)의 절반
+  assert.equal(v.topLine(), 301);
+  assert.ok([...measured].every((i) => i >= 128), `셋째 묶음(블록 128~)만 잰다: ${[...measured].sort((x, y) => x - y)}`);
+  measured.clear();
+  v.scrollToLine(101); // 블록 50(줄 100)과 51 사이
+  assert.equal(scroll, 100 + 20 * 50 + 10);
+  assert.ok([...measured].every((i) => i < 64), '첫 묶음만 잰다');
+  scroll = 50; // 첫 블록 위
+  assert.equal(v.topLine(), 0);
 });
 
 /** 분할 보기 동기화 시험용 가짜 한쪽 보기. 줄 번호만 다룬다. */

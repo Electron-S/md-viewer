@@ -14,6 +14,75 @@ interface LineAnchor {
   top: number;
 }
 
+/** 최상위 묶음(.mdv-chunk 또는 묶지 않은 블록 하나)과 그 첫 줄·위치. 안쪽 블록의 위치(anchors)는 처음 쓸 때 잰다. */
+interface Group extends LineAnchor {
+  anchors: LineAnchor[] | null;
+}
+
+const CHUNK_CLASS = 'mdv-chunk';
+/** 묶음 하나에 넣는 최상위 블록 수 */
+const CHUNK_BLOCKS = 64;
+/** 위 여백이 있는 블록. 묶음은 안쪽 여백이 밖과 겹치지 않으므로 이 블록이 묶음 첫 블록이 되면 간격이 넓어진다. */
+const MARGIN_TOP_TAGS = new Set(['H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'HR']);
+
+/**
+ * 최상위 블록을 CHUNK_BLOCKS개씩 묶음(.mdv-chunk)에 넣는다 (NFR-PERF-02).
+ * 화면 밖 건너뛰기(content-visibility)를 블록마다 걸면 브라우저가 블록마다 교차 관찰을 해, 블록이 수만 개인 문서는
+ * 그 계산만으로 수백 ms가 든다(1 MB 시험 문서에서 약 220 ms). 묶음에 걸면 그 수가 수십 분의 1로 준다.
+ * 위 여백이 있는 블록 앞에서는 자르지 않고 미룬다. 그런 블록만 이어지면 두 배에서 자른다.
+ */
+export function chunkBlocks(frag: DocumentFragment): DocumentFragment {
+  const out = document.createDocumentFragment();
+  let chunk: HTMLElement | null = null;
+  let count = 0;
+  for (const node of Array.from(frag.childNodes)) {
+    if (node.nodeType === Node.ELEMENT_NODE) {
+      const full = count >= CHUNK_BLOCKS && (!MARGIN_TOP_TAGS.has((node as Element).tagName) || count >= 2 * CHUNK_BLOCKS);
+      if (!chunk || full) {
+        chunk = document.createElement('div');
+        chunk.className = CHUNK_CLASS;
+        out.append(chunk);
+        count = 0;
+      }
+      count++;
+    }
+    (chunk ?? out).append(node);
+  }
+  return out;
+}
+
+/** 줄 번호와 위치가 함께 증가하는 것만 남긴다 (중첩 요소의 중복 제거). */
+function monotone<T extends LineAnchor>(list: T[]): T[] {
+  list.sort((a, b) => a.line - b.line || a.top - b.top);
+  const out: T[] = [];
+  for (const a of list) {
+    const last = out[out.length - 1];
+    if (last && (a.line === last.line || a.top <= last.top)) continue;
+    out.push(a);
+  }
+  return out;
+}
+
+/** 앞쪽은 참, 뒤쪽은 거짓인 목록에서 마지막 참의 위치. 모두 거짓이면 0. */
+function lastIndex<T>(list: T[], ok: (x: T) => boolean): number {
+  let lo = 0;
+  let hi = list.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (ok(list[mid])) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo;
+}
+
+/** 블록의 data-line. 없거나 숫자가 아니면 null */
+function lineOf(el: Element | null): number | null {
+  const v = el?.getAttribute('data-line');
+  if (v == null) return null;
+  const line = Number(v);
+  return Number.isFinite(line) ? line : null;
+}
+
 /**
  * 미리보기 (SDD 4장). 정제된 문서를 Shadow DOM에 넣어 문서 스타일이 앱 UI로 새지 않게 한다.
  * 스크롤 위치는 `data-line` 소스 맵으로 원문 줄과 맞바꾼다 (ARCH-03).
@@ -24,7 +93,7 @@ export class PreviewView {
   readonly article: HTMLElement;
   private noticeEl: HTMLElement;
   onLink: (action: LinkAction) => void = () => {};
-  private anchors: LineAnchor[] | null = null;
+  private groups: Group[] | null = null;
   private marks: HTMLElement[] = [];
   private current = -1;
   /** 프로그램이 스크롤 위치를 맞추는 중인지. 이 동안의 스크롤은 사용자 스크롤로 치지 않는다. */
@@ -57,8 +126,8 @@ export class PreviewView {
     }
     this.root.append(this.article);
     this.root.addEventListener('click', (e) => this.onClick(e as MouseEvent));
-    new ResizeObserver(() => (this.anchors = null)).observe(this.article);
-    this.article.addEventListener('load', () => (this.anchors = null), true);
+    new ResizeObserver(() => (this.groups = null)).observe(this.article);
+    this.article.addEventListener('load', () => (this.groups = null), true);
     // 사용자가 직접 스크롤하면 위치 맞추기를 멈춘다.
     for (const ev of ['wheel', 'pointerdown', 'keydown', 'touchstart']) {
       this.el.addEventListener(ev, () => this.cancelSettle(), { passive: true });
@@ -78,7 +147,7 @@ export class PreviewView {
     const id = ++this.settleId;
     this.settling = true;
     const apply = () => {
-      this.anchors = null;
+      this.groups = null;
       const y = target();
       if (y != null) this.el.scrollTop = y;
     };
@@ -99,7 +168,7 @@ export class PreviewView {
   setContent(nodes: Node | null) {
     this.clearFind();
     this.article.replaceChildren(...(nodes ? [nodes] : []));
-    this.anchors = null;
+    this.groups = null;
   }
 
   /** 보여주던 문서 노드를 복제 없이 꺼낸다. 다시 보여줄 때 setContent로 되돌린다. */
@@ -107,7 +176,7 @@ export class PreviewView {
     this.clearFind();
     const frag = document.createDocumentFragment();
     while (this.article.firstChild) frag.append(this.article.firstChild);
-    this.anchors = null;
+    this.groups = null;
     return frag;
   }
 
@@ -132,7 +201,7 @@ export class PreviewView {
     this.noticeEl.replaceChildren();
     this.noticeEl.hidden = !notice;
     // 띠가 문서를 밀어 내리므로 재 둔 블록 위치를 버린다.
-    this.anchors = null;
+    this.groups = null;
     if (!notice) return;
     const p = document.createElement('span');
     p.textContent = notice.text;
@@ -147,7 +216,7 @@ export class PreviewView {
 
   setZoom(percent: number) {
     this.article.style.setProperty('zoom', String(percent / 100));
-    this.anchors = null;
+    this.groups = null;
   }
 
   private onClick(e: MouseEvent) {
@@ -177,43 +246,59 @@ export class PreviewView {
     return true;
   }
 
-  private getAnchors(): LineAnchor[] {
-    if (this.anchors) return this.anchors;
-    const base = this.el.getBoundingClientRect().top - this.el.scrollTop;
-    const list: LineAnchor[] = [];
-    // 최상위 블록만 잰다. 블록은 content-visibility로 화면 밖 배치를 건너뛰므로,
-    // 안쪽 요소(목록 항목·표 행)를 재면 블록마다 강제 배치가 일어나 매우 느려진다.
+  /** 스크롤 영역 안 문서 좌표의 기준(스크롤해도 변하지 않는다) */
+  private baseTop(): number {
+    return this.el.getBoundingClientRect().top - this.el.scrollTop;
+  }
+
+  /**
+   * 최상위 묶음의 첫 줄과 위치. 묶음만 재므로 블록이 수만 개여도 싸다.
+   * 묶음은 content-visibility로 화면 밖 배치를 건너뛰므로, 안쪽 블록을 모두 재면 묶음마다 강제 배치가 일어나 매우 느려진다.
+   * 안쪽 블록은 groupAnchors가 필요한 묶음만 잰다.
+   */
+  private getGroups(): Group[] {
+    if (this.groups) return this.groups;
+    const base = this.baseTop();
+    const list: Group[] = [];
     for (const el of Array.from(this.article.children) as HTMLElement[]) {
-      if (!el.hasAttribute('data-line')) continue;
-      const line = Number(el.getAttribute('data-line'));
-      if (!Number.isFinite(line)) continue;
-      list.push({ line, el, top: el.getBoundingClientRect().top - base });
+      // 묶음의 첫 줄은 줄 정보가 있는 첫 블록의 줄이다.
+      const first = el.classList.contains(CHUNK_CLASS) ? Array.from(el.children).find((c) => lineOf(c) != null) ?? null : el;
+      const line = lineOf(first);
+      if (line != null) list.push({ line, el, top: el.getBoundingClientRect().top - base, anchors: null });
     }
-    // 줄 번호와 위치가 함께 증가하는 것만 남긴다 (중첩 요소의 중복 제거).
-    list.sort((a, b) => a.line - b.line || a.top - b.top);
-    const mono: LineAnchor[] = [];
-    for (const a of list) {
-      const last = mono[mono.length - 1];
-      if (last && (a.line === last.line || a.top <= last.top)) continue;
-      mono.push(a);
+    this.groups = monotone(list);
+    return this.groups;
+  }
+
+  /** 묶음 하나의 블록 위치. 처음 쓸 때 잰다. 묶지 않은 블록은 그 자체다. */
+  private groupAnchors(g: Group): LineAnchor[] {
+    if (g.anchors) return g.anchors;
+    if (!g.el.classList.contains(CHUNK_CLASS)) return (g.anchors = [g]);
+    const base = this.baseTop();
+    const list: LineAnchor[] = [];
+    for (const el of Array.from(g.el.children) as HTMLElement[]) {
+      const line = lineOf(el);
+      if (line != null) list.push({ line, el, top: el.getBoundingClientRect().top - base });
     }
-    this.anchors = mono;
-    return mono;
+    g.anchors = monotone(list);
+    return g.anchors;
+  }
+
+  /** 묶음 i의 블록 위치에 다음 묶음의 시작을 붙인 것. 묶음 끝 블록과 다음 묶음 사이도 비율로 나눌 수 있다. */
+  private anchorsIn(groups: Group[], i: number): LineAnchor[] {
+    const own = this.groupAnchors(groups[i]);
+    return i + 1 < groups.length ? [...own, groups[i + 1]] : own;
   }
 
   /** 화면 맨 위에 보이는 원문 줄(소수점은 블록 안 비율) */
   topLine(): number {
-    const anchors = this.getAnchors();
-    if (!anchors.length) return 0;
+    const groups = this.getGroups();
+    if (!groups.length) return 0;
     const y = this.el.scrollTop;
-    let lo = 0;
-    let hi = anchors.length - 1;
-    if (y <= anchors[0].top) return anchors[0].line * Math.max(0, y / Math.max(1, anchors[0].top));
-    while (lo < hi) {
-      const mid = (lo + hi + 1) >> 1;
-      if (anchors[mid].top <= y) lo = mid;
-      else hi = mid - 1;
-    }
+    const first = groups[0];
+    if (y <= first.top) return first.line * Math.max(0, y / Math.max(1, first.top));
+    const anchors = this.anchorsIn(groups, lastIndex(groups, (g) => g.top <= y));
+    const lo = lastIndex(anchors, (x) => x.top <= y);
     const a = anchors[lo];
     const b = anchors[lo + 1];
     if (!b) return a.line;
@@ -231,10 +316,10 @@ export class PreviewView {
   }
 
   private lineToY(line: number): number | null {
-    const anchors = this.getAnchors();
-    if (!anchors.length) return null;
-    let i = 0;
-    while (i + 1 < anchors.length && anchors[i + 1].line <= line) i++;
+    const groups = this.getGroups();
+    if (!groups.length) return null;
+    const anchors = this.anchorsIn(groups, lastIndex(groups, (g) => g.line <= line));
+    const i = lastIndex(anchors, (x) => x.line <= line);
     const a = anchors[i];
     const b = anchors[i + 1];
     let y = a.top;
