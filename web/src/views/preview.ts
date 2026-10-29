@@ -19,6 +19,10 @@ interface Group extends LineAnchor {
   anchors: LineAnchor[] | null;
 }
 
+const SVG_NS = 'http://www.w3.org/2000/svg';
+/** 찾기에서 건너뛰는 글자: 다이어그램의 스타일시트와 보이지 않는 SVG 제목·설명 */
+const HIDDEN_TEXT_PARENTS = new Set(['style', 'script', 'title', 'desc']);
+
 const CHUNK_CLASS = 'mdv-chunk';
 /** 묶음 하나에 넣는 최상위 블록 수 */
 const CHUNK_BLOCKS = 64;
@@ -94,7 +98,7 @@ export class PreviewView {
   private noticeEl: HTMLElement;
   onLink: (action: LinkAction) => void = () => {};
   private groups: Group[] | null = null;
-  private marks: HTMLElement[] = [];
+  private marks: Element[] = [];
   private current = -1;
   /** 프로그램이 스크롤 위치를 맞추는 중인지. 이 동안의 스크롤은 사용자 스크롤로 치지 않는다. */
   settling = false;
@@ -219,6 +223,12 @@ export class PreviewView {
     this.groups = null;
   }
 
+  /** 본문 폭(안쪽 여백 제외, 확대 전). 다이어그램을 그리는 무대 폭으로 쓴다. */
+  contentWidth(): number {
+    const cs = getComputedStyle(this.article);
+    return this.article.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+  }
+
   private onClick(e: MouseEvent) {
     const a = (e.target as Element | null)?.closest?.('a');
     if (!a) return;
@@ -333,21 +343,25 @@ export class PreviewView {
     this.clearFind();
     const { re, error } = buildRegex(q);
     if (!re) return { count: 0, index: -1, error };
-    const walker = document.createTreeWalker(this.article, NodeFilter.SHOW_TEXT);
+    const walker = document.createTreeWalker(this.article, NodeFilter.SHOW_TEXT, {
+      acceptNode: (n) => (HIDDEN_TEXT_PARENTS.has(n.parentElement?.localName ?? '') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
+    });
     const nodes: Text[] = [];
     for (let n = walker.nextNode(); n; n = walker.nextNode()) nodes.push(n as Text);
     for (const node of nodes) {
       if (this.marks.length >= MAX_MATCHES) break;
       const ranges = findRanges(node.data, re, MAX_MATCHES - this.marks.length);
       if (!ranges.length) continue;
+      // SVG 글자(다이어그램의 text·tspan) 안에 HTML <mark>를 넣으면 글자가 사라진다. SVG tspan으로 감싸 색으로 강조한다 (FR-REN-07).
+      const inSvg = node.parentElement?.namespaceURI === SVG_NS;
       // 뒤에서부터 잘라야 앞쪽 오프셋이 유지된다.
-      const created: HTMLElement[] = [];
+      const created: Element[] = [];
       for (let i = ranges.length - 1; i >= 0; i--) {
         const [s, e] = ranges[i];
         const hit = node.splitText(s);
         hit.splitText(e - s);
-        const mark = document.createElement('mark');
-        mark.className = 'mdv-hit';
+        const mark = inSvg ? document.createElementNS(SVG_NS, 'tspan') : document.createElement('mark');
+        mark.setAttribute('class', 'mdv-hit');
         hit.replaceWith(mark);
         mark.append(hit);
         created.unshift(mark);

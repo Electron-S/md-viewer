@@ -1,7 +1,8 @@
 import { createBridge, HostError, type HostDoc, type PathEntry, type ReadyInfo } from './bridge';
 import { CommandRegistry } from './commands';
 import { DocStore, encodingLabel, formatSize, type DocModel, type Encoding } from './docs';
-import { createMarkdown, renderMarkdown, scanHeadings, type Heading } from './render/markdown';
+import { DiagramRenderer } from './render/diagrams';
+import { createMarkdown, DIAGRAM_CLASS, renderMarkdown, scanHeadings, type Heading } from './render/markdown';
 import { basename, dirname, docKey } from './render/paths';
 import { createSanitizer, isViewablePath } from './render/sanitize';
 import {
@@ -26,6 +27,9 @@ interface Rendered {
   docId: string;
   version: number;
   allowRemote: boolean;
+  /** 다이어그램을 그린 테마. 다이어그램이 있는 문서만 테마가 바뀌면 다시 그린다 (FR-REN-07). */
+  dark: boolean;
+  hasDiagrams: boolean;
   headings: Heading[];
   /** 정제된 문서 노드. 보이는 동안은 미리보기로 옮겨 가 비어 있다. */
   frag?: DocumentFragment;
@@ -44,6 +48,8 @@ const ENCODINGS: { id: Encoding; label: string }[] = [
 const RENDER_DEBOUNCE_MS = 120;
 /** 렌더링 결과를 남겨 둘 문서 수 (보이는 문서 제외). 메모리 목표(NFR-PERF-06) 때문에 작게 둔다. */
 const RENDER_CACHE_SIZE = 6;
+/** 인쇄할 때 그리는 중인 다이어그램을 기다리는 최대 시간 */
+const PRINT_DIAGRAM_WAIT_MS = 3000;
 
 function $(id: string): HTMLElement {
   const el = document.getElementById(id);
@@ -63,6 +69,15 @@ export class App {
   private md = createMarkdown();
   private sanitizer = createSanitizer(window);
   readonly preview = new PreviewView();
+  readonly diagrams = new DiagramRenderer({
+    clean: (svg, id) => this.sanitizer.sanitizeDiagram(svg, id),
+    width: () => this.preview.contentWidth(),
+    // 다이어그램 구문 오류는 문서의 문제이고 화면에 안내도 하므로 앱 오류가 아닌 경고로 남긴다.
+    onFailed: (line, msg) => this.logWarn(S.log.diagramFailed(this.activeDoc()?.path ?? '', line, msg)),
+    onLoadFailed: (msg) => this.logError(S.log.diagramModuleFailed(msg)),
+    // 원문 코드가 다이어그램으로 바뀌었으므로 열려 있는 찾기를 다시 돈다.
+    onIdle: () => this.findbar.refresh(),
+  });
   /** 원문 보기는 처음 쓸 때 실행한다 (시작할 때 CodeMirror를 실행하지 않아 NFR-PERF-01을 맞춘다, loadSourceBundle 참고). */
   source: SourceView | null = null;
   private sourceLoading: Promise<SourceView> | null = null;
@@ -75,7 +90,7 @@ export class App {
   private sync!: ScrollSync;
 
   private renderCache = new Map<string, Rendered>();
-  private shown: { docId: string; version: number; allowRemote: boolean } | null = null;
+  private shown: { docId: string; version: number; allowRemote: boolean; dark: boolean } | null = null;
   private headings: Heading[] = [];
   private refreshTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingFragment: { docId: string; fragment: string } | null = null;
@@ -581,13 +596,14 @@ export class App {
 
   private showPreview(r: Rendered) {
     const s = this.shown;
-    if (s && s.docId === r.docId && s.version === r.version && s.allowRemote === r.allowRemote) return;
+    if (s && s.docId === r.docId && s.version === r.version && s.allowRemote === r.allowRemote && s.dark === r.dark) return;
     this.stashShown();
     if (r.message) this.preview.setMessage(r.message.text, r.message.action);
     else this.preview.setContent(r.frag!);
+    if (r.hasDiagrams) void this.diagrams.renderPending(this.preview.article);
     const openFolder = () => void this.openFolderForActive().catch((err) => this.reportError(err));
     this.preview.setNotice(r.needsFolder ? { text: S.preview.needFolder, action: { label: S.preview.openFolder, run: openFolder } } : null);
-    this.shown = { docId: r.docId, version: r.version, allowRemote: r.allowRemote };
+    this.shown = { docId: r.docId, version: r.version, allowRemote: r.allowRemote, dark: r.dark };
   }
 
   /** 브리지가 나중에 주소를 주는 로컬 이미지(data-mdv-src)를 채운다 (SDD 8.1). */
@@ -626,20 +642,21 @@ export class App {
     if (!s) return;
     const prev = this.renderCache.get(s.docId);
     const content = this.preview.takeContent();
-    if (prev && !prev.message && prev.version === s.version && prev.allowRemote === s.allowRemote) prev.frag = content;
+    if (prev && !prev.message && prev.version === s.version && prev.allowRemote === s.allowRemote && prev.dark === s.dark) prev.frag = content;
     this.shown = null;
   }
 
   /** 렌더링 결과를 캐시에서 꺼내거나 새로 만든다 (SDD 8.1). */
   private getRendered(doc: DocModel): Rendered {
     const allowRemote = this.settings.allowRemoteImages;
+    const dark = this.isDark();
     const cached = this.renderCache.get(doc.id);
-    if (cached && cached.version === doc.version && cached.allowRemote === allowRemote) {
+    if (cached && cached.version === doc.version && cached.allowRemote === allowRemote && (!cached.hasDiagrams || cached.dark === dark)) {
       this.renderCache.delete(doc.id);
       this.renderCache.set(doc.id, cached);
       return cached;
     }
-    const r: Rendered = { docId: doc.id, version: doc.version, allowRemote, headings: [] };
+    const r: Rendered = { docId: doc.id, version: doc.version, allowRemote, dark, hasDiagrams: false, headings: [] };
     if (doc.binary) {
       r.message = { text: S.preview.binary };
     } else if (doc.kind === 'text') {
@@ -669,6 +686,8 @@ export class App {
         });
         r.frag = chunkBlocks(clean);
         this.loadImages(r.frag);
+        r.hasDiagrams = !!r.frag.querySelector(`.${DIAGRAM_CLASS}`);
+        if (r.hasDiagrams) this.diagrams.applyCached(r.frag);
         r.needsFolder = !this.bridge.canResolveRelative(doc.path) && !!r.frag.querySelector('img[data-mdv-src], a[data-mdv-path]');
       } catch (err) {
         // FR-REN-04: 블록 하나의 실패는 renderMarkdown이 그 블록만 바꾼다. 여기는 파싱·정제 자체가 실패했을 때다.
@@ -790,6 +809,10 @@ export class App {
     const dark = this.isDark();
     document.documentElement.dataset.theme = dark ? 'dark' : 'light';
     this.source?.setDark(dark);
+    this.diagrams.setDark(dark);
+    // 다이어그램은 테마 색을 SVG에 담아 그리므로, 보이는 문서에 다이어그램이 있으면 다시 그린다. 나머지 문서는 꺼낼 때 다시 그린다.
+    const shown = this.shown;
+    if (shown && shown.dark !== dark && this.renderCache.get(shown.docId)?.hasDiagrams) this.forceRerender(shown.docId);
     // Windows 앱의 제목 표시줄도 맞춘다. 시작할 때는 호스트가 저장된 설정을 보고 이미 맞췄다.
     if (this.started && this.bridge.mode === 'desktop') void this.bridge.request('window.setTheme', { dark }).catch((err) => this.logError(String(err)));
   }
@@ -966,6 +989,10 @@ export class App {
     void this.bridge.request('app.log', { level: 'error', msg }).catch(() => {});
   }
 
+  private logWarn(msg: string) {
+    void this.bridge.request('app.log', { level: 'warn', msg }).catch(() => {});
+  }
+
   // ------------------------------------------------------------------ 명령·메뉴
 
   private setMode(mode: ViewMode) {
@@ -986,7 +1013,9 @@ export class App {
       window.removeEventListener('afterprint', done);
     };
     window.addEventListener('afterprint', done);
-    window.print();
+    // 아직 그리는 다이어그램이 있으면 잠시 기다려 원문 코드 대신 다이어그램이 인쇄되게 한다 (FR-REN-07).
+    if (this.diagrams.busy) void this.diagrams.idle(PRINT_DIAGRAM_WAIT_MS).then(() => window.print());
+    else window.print();
   }
 
   private async copyText(text: string) {

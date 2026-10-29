@@ -1,12 +1,12 @@
 # MD Viewer
 
-설치 없이 쓰는 Markdown 뷰어입니다. HTML 파일 하나(`viewer.html`)를 브라우저로 열어 쓰거나, Windows 앱(`MDViewer.exe`)으로 탐색기에서 문서를 바로 열거나, Claude Code에서 "이 문서 열어줘"라고 하면 스킬이 브라우저에 띄워 줍니다. 탭으로 여러 문서를 열고, 미리보기·원문·분할 보기를 오가며 읽고, 목차와 작업 공간 트리로 이동합니다.
+설치 없이 쓰는 Markdown 뷰어입니다. HTML 파일 하나(`viewer.html`)를 브라우저로 열어 쓰거나, Windows 앱(`MDViewer.exe`)으로 탐색기에서 문서를 바로 열거나, Claude Code에서 "이 문서 열어줘"라고 하면 스킬이 브라우저에 띄워 줍니다. 탭으로 여러 문서를 열고, 미리보기·원문·분할 보기를 오가며 읽고, 목차와 작업 공간 트리로 이동합니다. ```` ```mermaid ```` 블록은 다이어그램으로 그려 보여 줍니다.
 
-- 버전: v1.1.1 ([릴리스 노트](RELEASE_NOTES.md))
+- 버전: v1.2.0 ([릴리스 노트](RELEASE_NOTES.md))
 - 뷰어: Edge·Chrome 최근 버전(모든 기능), Firefox·Safari 최신판(열기·렌더링·찾기·보기 모드)
 - Windows 앱: Windows 10/11 x64. WebView2 런타임과 .NET Framework 4.8이 필요하며 둘 다 Windows에 기본으로 들어 있습니다.
 - 실행기·스킬: Node.js 18 이상(Windows 10/11, WSL2, macOS, Linux)
-- 크기: `viewer.html` 약 0.75 MB, `MDViewer.exe` 약 1.7 MB, 스킬 묶음 zip 약 0.27 MB
+- 크기: `viewer.html` 약 2.8 MB, `MDViewer.exe` 약 3.8 MB, 스킬 묶음 zip 약 1.8 MB (Mermaid가 약 2 MB를 차지한다)
 - 요구사항: [SRS](https://claude.ai/code/artifact/de92e02f-5cc5-40f2-a3ca-80b6b2894cf1) · 설계: [SDD](https://claude.ai/code/artifact/80e2d190-46f7-4ac1-8d38-7a1954577b38) (비공개 문서. 요구사항 ID는 코드 주석과 테스트 이름에 그대로 쓴다)
 
 ## 쓰는 방법
@@ -61,13 +61,22 @@ mdview --status | --stop
 - 밖에서 파일을 고치면 0.5초 안에 다시 그립니다. 브라우저 탭을 닫거나 새로 고쳐도 탭·보기 모드·스크롤 위치를 복원합니다.
 - WSL에서 실행하면 Windows 기본 브라우저로 엽니다. `C:\…`나 `\\wsl.localhost\…` 같은 Windows 경로도 받습니다.
 
+### Mermaid 다이어그램
+
+````` ```mermaid ````` 펜스 블록을 다이어그램으로 그립니다(flowchart, sequence, class, state, ER, gantt, pie, mindmap, git graph 등 Mermaid 12.2가 그리는 것 모두, ELK 레이아웃 포함). 세 쓰는 방법 모두 같고, 바깥과 통신하지 않습니다.
+
+- 문서에 다이어그램이 처음 나올 때 뷰어 안에 압축해 둔 Mermaid를 풀어 실행합니다. 그리는 동안에는 원문 코드가 보입니다.
+- 다이어그램 안의 글자도 찾기(Ctrl+F)와 복사가 됩니다. 테마를 바꾸면 그 색으로 다시 그립니다.
+- 구문이 틀린 다이어그램은 오류 한 줄과 원문을 보여 줍니다.
+- 보안 수준은 Mermaid의 `strict`로 고정합니다(`%%{init}%%`로 바꿀 수 없음). 다이어그램 안의 링크(`click … href`)·콜백·이미지는 따르거나 불러오지 않습니다.
+
 단축키 목록은 뷰어에서 F1. 브라우저가 가로채는 키(Ctrl+W, Ctrl+Tab 등)를 피해 탭 닫기는 Alt+W, 닫은 탭 다시 열기는 Alt+Shift+T, 다음·이전 탭은 Alt+PageDown/PageUp입니다.
 
 ## 구조
 
 | 경로 | 내용 |
 | --- | --- |
-| `web/src/` | 화면(TypeScript). 렌더링(markdown-it + DOMPurify), 탭, 목차, 찾기, 명령 레지스트리, 브리지(파일 핸들·실행기) |
+| `web/src/` | 화면(TypeScript). 렌더링(markdown-it + DOMPurify, Mermaid 다이어그램), 탭, 목차, 찾기, 명령 레지스트리, 브리지(파일 핸들·실행기) |
 | `web/static/` | index.html, CSS |
 | `launcher/` | 실행기(Node.js 표준 라이브러리만). 명령, 127.0.0.1 서버, 파일 감시, OS 연동 |
 | `host/` | Windows 앱(C# 5, .NET Framework 4.8 + WebView2). 창, 브리지, 파일·감시·저장, 연결 프로그램 등록. 빌드가 viewer.html과 WebView2 DLL을 EXE 안에 넣는다 |
@@ -83,8 +92,8 @@ UI 문자열은 `web/src/strings.ts`, `launcher/strings.ts`, `host/Strings.cs` �
 
 ```bash
 npm ci
-node tools/build.mjs   # 타입 검사 → dist/viewer.html, dist/mdview/, dist/mdview-<버전>.zip, dist/MDViewer.exe, 크기 검사
-node tools/test.mjs    # 단위 테스트 105개(화면 62, 실행기 43. CommonMark 스펙 652개·GFM 확장 24개, XSS, 문자열 분리 등)
+node tools/build.mjs   # 타입 검사 → dist/viewer.html, dist/mdview/, dist/mdview-<버전>.zip, dist/MDViewer.exe, dist/THIRD-PARTY-NOTICES.txt, 크기 검사
+node tools/test.mjs    # 단위 테스트 119개(화면 76, 실행기 43. CommonMark 스펙 652개·GFM 확장 24개, XSS, 다이어그램 정제, 문자열 분리 등)
                        # + Windows 앱 단위 테스트 11개(확인 50개, Windows·WSL에서만)
 ./tools/e2e.sh         # E2E (WSL + Windows Edge + MDViewer.exe. 준비는 tools/e2e.sh 머리말 참고)
 ```
@@ -102,5 +111,7 @@ E2E는 WSL에서 실행기를 띄우고 Windows의 Python + Playwright로 Edge�
 [MIT](LICENSE).
 
 - `tests/samples/commonmark-spec.json`은 [CommonMark Spec](https://spec.commonmark.org/0.31.2/)(John MacFarlane), `tests/samples/gfm-extensions.json`은 [GitHub Flavored Markdown Spec](https://github.github.com/gfm/)의 확장 예제를 뽑은 것이며, 두 파일에는 [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/)이 적용됩니다.
-- `viewer.html`에는 npm 의존성(markdown-it·markdown-it-footnote·CodeMirror MIT, markdown-it-task-lists ISC, highlight.js BSD-3-Clause, DOMPurify MPL-2.0 또는 Apache-2.0)이 묶여 들어갑니다.
-- `MDViewer.exe`에는 Microsoft Edge WebView2 SDK의 DLL이 들어갑니다(BSD 형식 라이선스). 전문은 [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt)에 있습니다.
+- `viewer.html`에는 npm 의존성(markdown-it·markdown-it-footnote·CodeMirror·Mermaid MIT, markdown-it-task-lists ISC, highlight.js BSD-3-Clause, DOMPurify MPL-2.0 또는 Apache-2.0, 그리고 Mermaid가 쓰는 d3·dagre·cytoscape·KaTeX 등)이 묶여 들어갑니다. ELK 레이아웃(elkjs)은 EPL-2.0이며 소스는 https://github.com/kieler/elkjs 에 있습니다.
+- `MDViewer.exe`에는 Microsoft Edge WebView2 SDK의 DLL이 들어갑니다(BSD 형식 라이선스).
+- 빌드가 묶인 npm 패키지 전부의 라이선스 전문을 저장소의 [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt)(WebView2) 뒤에 붙여 `dist/THIRD-PARTY-NOTICES.txt`로 만들고, 릴리스와 스킬 묶음에 넣습니다.
+- `tests/samples/mermaid-svg.json`은 Mermaid 12.2.0이 그린 SVG 결과로, 정제 시험에 씁니다.

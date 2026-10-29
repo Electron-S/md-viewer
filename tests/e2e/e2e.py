@@ -161,12 +161,81 @@ def readme_text():
     ])
 
 
+def diagrams_text(tag=''):
+    """Mermaid 시험 문서 (FR-REN-07): 정상 6개(한글 라벨, ELK 레이아웃 포함)와 깨진 1개, 위아래 긴 본문.
+    tag(영문자)를 주면 원문이 달라져 앞에서 그린 캐시를 쓰지 않는다."""
+    blocks = [
+        f'flowchart LR\n  A[한글 시작{tag}] --> B{{판단}}\n  B -->|예| C[끝]',
+        f'sequenceDiagram\n  Alice->>Bob: 안녕하세요{tag}\n  Bob-->>Alice: 반갑습니다',
+        f'classDiagram\n  class Animal{tag} {{\n    +String 이름\n  }}\n  Animal{tag} <|-- Dog',
+        f'stateDiagram-v2\n  [*] --> Idle{tag}\n  Idle{tag} --> Run : 시작\n  Run --> [*]',
+        f'mindmap\n  root((중심{tag}))\n    가지 하나\n    가지 둘',
+        f'---\nconfig:\n  layout: elk\n---\nflowchart TD\n  P[엘크{tag}] --> Q[아래]\n  P --> R[옆]',
+        'flowchart LR\n  A -->',
+    ]
+    body = '본문 문장입니다. ' * 30
+    parts = ['# 다이어그램', *[f'## 앞 절 {i}\n\n{body}' for i in range(6)]]
+    parts += [f'```mermaid\n{b}\n```' for b in blocks]
+    parts += ['## 아래 절', *[f'## 뒤 절 {i}\n\n{body}' for i in range(20)]]
+    return '\n\n'.join(parts) + '\n'
+
+
+# 다이어그램을 다 그렸는지: 그리는 중이 아니고 원문 코드 상자가 남지 않았다.
+DIAGRAMS_DONE = "() => !__mdv.diagrams.busy && !__mdv.preview.article.querySelector('.mdv-mermaid > pre')"
+# 그린 다이어그램 요약. 라벨(foreignObject)이 상자보다 넓으면 무대와 미리보기의 글자 폭이 다른 것이다.
+DIAGRAM_REPORT = '''() => {
+    const root = __mdv.preview.article;
+    const svgs = [...root.querySelectorAll('.mdv-mermaid > svg')];
+    const over = [...root.querySelectorAll('.mdv-mermaid foreignObject')]
+        .filter(f => f.firstElementChild && f.firstElementChild.scrollWidth > Math.ceil(+f.getAttribute('width')) + 1)
+        .map(f => f.textContent.trim().slice(0, 20));
+    return {
+        n: svgs.length,
+        ids: svgs.map(s => s.id),
+        widths: svgs.map(s => Math.round(s.getBoundingClientRect().width)),
+        pending: root.querySelectorAll('.mdv-mermaid > pre').length,
+        errors: [...root.querySelectorAll('.mdv-block-error p')].map(p => p.textContent),
+        over,
+        text: svgs.map(s => s.textContent).join(' '),
+        stage: document.querySelector('iframe.mdv-mermaid-stage')?.contentDocument?.body?.childElementCount ?? -1,
+    };
+}'''
+
+
+# NFR-SEC-01 검사. 미리보기에는 style 속성·요소가 없어야 하고, 예외는 Mermaid 다이어그램 svg 안뿐이다(FR-REN-07).
+XSS_REPORT = '''() => {
+    const root = __mdv.preview.article;
+    const inDiagram = (el) => !!el.closest('.mdv-mermaid > svg');
+    const bad = [...root.querySelectorAll('*')].filter(el => [...el.attributes].some(at =>
+        /^on/i.test(at.name) || (at.name === 'style' && !inDiagram(el)) || at.name === 'srcset' || /^\\s*javascript:/i.test(at.value)));
+    const banned = [...root.querySelectorAll('iframe,script,style,video,form,button')]
+        .filter(el => !(el.localName === 'style' && el.parentElement?.matches('.mdv-mermaid > svg'))).length;
+    const css = [...root.querySelectorAll('.mdv-mermaid style')].map(x => x.textContent)
+        .concat([...root.querySelectorAll('.mdv-mermaid [style]')].map(x => x.getAttribute('style'))).join('\\n');
+    const srcs = [...root.querySelectorAll('img')].map(i => i.getAttribute('src')).filter(Boolean);
+    // 다이어그램 안의 요소가 상자 밖(앱 화면)으로 나가 그려지지 않는다(contain: layout paint).
+    const escaped = [...root.querySelectorAll('.mdv-mermaid')].flatMap(box => {
+        const b = box.getBoundingClientRect();
+        return [...box.querySelectorAll('*')].filter(el => { const r = el.getBoundingClientRect();
+            return r.width > 0 && (r.left < b.left - 1 || r.top < b.top - 1 || r.right > b.right + 1 || r.bottom > b.bottom + 1); });
+    }).length;
+    return { xss: window.__xss ?? null, bad: bad.length, banned, srcs, escaped,
+             leak: css.match(/url\\((?!\\s*["']?#)[^)]*\\)/g) || [], diagrams: root.querySelectorAll('.mdv-mermaid > svg').length };
+}'''
+
+
+def diagrams_ok(r):
+    return (r['n'] == 6 and min(r['widths'] or [0]) > 0 and r['pending'] == 0 and r['stage'] == 0
+            and len(r['errors']) == 1 and 'Parse error' in r['errors'][0])
+
+
 def prepare_launcher_docs():
     readme = write(DOCS / 'README.md', readme_text())
     (DOCS / 'img').mkdir(exist_ok=True)
     (DOCS / 'img' / 'dot.png').write_bytes(PNG_1PX)
     write(DOCS / 'other.md', '# 다른 문서\n\n' + ('채우기 문단입니다.\n\n' * 60) + '## 둘째 절\n\n여기로 와야 합니다.\n\n' + ('끝 문단.\n\n' * 40))
     write(DOCS / 'notes.txt', '일반 텍스트 메모\n두 번째 줄\n')
+    write(DOCS / 'diagrams.md', diagrams_text())
     # '똠'(0x8C63)은 CP949 확장 영역. 브라우저의 euc-kr(windows-949) 디코더로 읽혀야 한다 (NFR-ENC-01).
     write(DOCS / 'cp949.md', '# 한글 문서\n\n완성형 인코딩으로 저장한 문서입니다. 똠방각하\n', encoding='cp949')
     (DOCS / 'binary.md').write_bytes(b'PK\x03\x04\x00\x00\x10binary')
@@ -204,6 +273,17 @@ def prepare_launcher_docs():
 def write_xss(port):
     return write(DOCS / 'xss.md', '\n\n'.join([
         '# XSS',
+        # Mermaid (FR-REN-07). 아래 <math> 줄은 닫히지 않은 요소로 뒤 블록을 삼키므로 그 앞에 둔다.
+        # themeCSS는 문서가 init으로 바꿀 수 있는 설정이라 바깥 주소 CSS·position:fixed가 그대로 SVG <style>에 들어온다.
+        # 이 바깥 주소들은 mermaid가 그리는 동안(정제 전) 무대에 들어간다. 무대 iframe의 CSP가 보내기 전에 막아야 한다(NFR-SEC-04).
+        '```mermaid\n%%{init: {"themeCSS": ".node rect { fill: url(https://example.com/leak.png) !important; position: fixed; top: 0 } '
+        'foreignObject div { position: fixed; inset: 0; z-index: 9999; background: red }", '
+        '"fontFamily": "x; background: url(https://example.com/leak-font.png)"}}%%\nflowchart LR\n'
+        '  A["<img src=x onerror=window.__xss=8>"] --> B["<style>.markdown-body{display:none}</style>라벨"]\n'
+        '  B --> C["<img src=\'https://example.com/leak-label.png\'>"]\n'
+        '  click A href "javascript:window.__xss=9"\n  click B call alert(10)\n```',
+        '```mermaid\nflowchart LR\n  I@{ img: "https://example.com/leak-node.png", label: "i", w: 40, h: 40 } --> J\n```',
+        '```mermaid\n%%{init: {"securityLevel": "loose"}}%%\nflowchart LR\n  C --> D\n  click C call alert(11)\n  click D href "javascript:window.__xss=12"\n```',
         '<script>window.__xss = 1; alert(1)</script>',
         '<img src=x onerror="window.__xss = 2; alert(2)">',
         '[클릭](javascript:window.__xss=3)',
@@ -395,8 +475,8 @@ def run_launcher(pw, L, ctx):
     url = L.open(P(readme), root=P(DOCS))
     port = int(urlparse(url).port)
     write_xss(port)
-    requests = []
-    ctx.on('request', lambda r: requests.append(r.url))
+    reqs = []
+    ctx.on('request', lambda r: reqs.append(r))
     a = Viewer.open(ctx, url)
     cur = [a]  # 두 번째 실행부터 뷰어 탭이 바뀐다
 
@@ -606,18 +686,77 @@ def run_launcher(pw, L, ctx):
         check('NFR-PERF-03', '큰 파일 미리보기 안내와 버튼', '미리보기 그리기' in msg, msg[:80])
     guard('NFR-PERF-03', '텍스트·바이너리·큰 파일', t_text_binary_large)
 
+    def t_diagrams():
+        a = cur[0]
+        p = P(DOCS / 'diagrams.md')
+        # 이 뷰어 탭에서 처음 그리는 다이어그램이다: 번들 풀기·실행·첫 그리기까지 잰다.
+        first = a.ev('''async (p) => {
+            const t0 = performance.now();
+            await __mdv.openFile(p);
+            while (!__mdv.preview.article.querySelector('.mdv-mermaid > svg')) {
+                if (performance.now() - t0 > 15000) return -1;
+                await new Promise(r => setTimeout(r, 10));
+            }
+            return performance.now() - t0;
+        }''', p)
+        a.wait(DIAGRAMS_DONE, 20000)
+        r = a.ev(DIAGRAM_REPORT)
+        check('FR-REN-07', 'Mermaid: flowchart·sequence·class·state·mindmap·ELK를 SVG로 그리고 깨진 것은 원문과 오류로',
+              diagrams_ok(r) and not a.errors, {k: r[k] for k in ('n', 'widths', 'pending', 'errors', 'stage')})
+        check('FR-REN-07', 'Mermaid: 한글 라벨이 그대로 나오고 상자를 넘치지 않는다', not r['over'] and '판단' in r['text'] and '안녕하세요' in r['text'], r['over'])
+        check('FR-REN-07', 'Mermaid: 첫 다이어그램 표시 1.5초 이내(번들 풀기·실행 포함)', 0 < first <= 1500, f'{first:.0f} ms')
+        shot(a, '20-diagrams')
+
+        hits = a.ev('''() => {
+            const out = {};
+            for (const t of ['판단', '안녕하세요', '가지 하나']) {
+                const n = __mdv.preview.find({ text: t, caseSensitive: false, wholeWord: false, regex: false }).count;
+                const els = [...__mdv.preview.article.querySelectorAll('.mdv-mermaid .mdv-hit')];
+                out[t] = { n, svg: els.filter(e => e.localName === 'tspan').length, visible: els.every(e => e.getBoundingClientRect().width > 0) };
+            }
+            __mdv.preview.clearFind();
+            return out;
+        }''')
+        check('FR-FIND-03', 'Mermaid: 다이어그램 안 한글 라벨도 찾아 보이게 강조한다(SVG 글자는 tspan)',
+              all(h['n'] >= 1 and h['visible'] for h in hits.values()) and any(h['svg'] for h in hits.values()), hits)
+
+        fill = "() => getComputedStyle(__mdv.preview.article.querySelector('.mdv-mermaid > svg .node rect, .mdv-mermaid > svg .node path')).fill"
+        light = a.ev(fill)
+        a.ev("() => __mdv.cmds.run('view.theme.dark')")
+        a.wait("(ids) => { const s = [...__mdv.preview.article.querySelectorAll('.mdv-mermaid > svg')]; return s.length === 6 && s.every(x => !ids.includes(x.id)); }", 20000, arg=r['ids'])
+        a.wait(DIAGRAMS_DONE, 20000)
+        dark = a.ev(fill)
+        shot(a, '21-diagrams-dark')
+        a.ev("() => __mdv.cmds.run('view.theme.light')")
+        back = a.ev("() => __mdv.preview.article.querySelectorAll('.mdv-mermaid > svg').length")
+        check('FR-REN-07', 'Mermaid: 다크 테마면 다시 그리고, 라이트로 돌아오면 캐시로 바로 끼운다', light != dark and back == 6, f'채움 {light} → {dark}, 돌아온 직후 {back}개')
+
+        write(DOCS / 'diagrams.md', diagrams_text() + '\n추가 문단입니다.\n')
+        a.wait("() => __mdv.preview.article.textContent.includes('추가 문단입니다')", 5000)
+        rr = a.ev("() => ({ svgs: __mdv.preview.article.querySelectorAll('.mdv-mermaid > svg').length, pending: __mdv.preview.article.querySelectorAll('.mdv-mermaid > pre').length })")
+        check('FR-WATCH-01', 'Mermaid: 다이어그램 밖을 고쳐 다시 그려도 다이어그램은 캐시로 바로 끼운다(원문 코드로 깜빡이지 않음)', rr == {'svgs': 6, 'pending': 0}, rr)
+
+        # 아래 절로 연 뒤 위쪽 다이어그램이 늦게 커져도 보던 줄을 지킨다(스크롤 앵커링). 캐시를 피하려고 원문을 바꾼다.
+        text = diagrams_text('Z')
+        target = text.split('\n').index('## 아래 절')
+        p2 = write(DOCS / 'diagrams-scroll.md', text)
+        a.ev('async ([p, l]) => { await __mdv.openFile(p, { line: l }); }', [P(p2), target])
+        a.wait(DIAGRAMS_DONE, 20000)
+        top = settled(lambda: a.ev('() => __mdv.preview.topLine()'))
+        check('FR-REN-07', 'Mermaid: 위쪽 다이어그램이 늦게 그려져도 보던 줄을 지킨다(±1줄)', top is not None and abs(top - target) <= 1, f'목표 {target}, 실제 {top}')
+    guard('FR-REN-07', 'Mermaid 다이어그램', t_diagrams)
+
     def t_xss():
         a = cur[0]
         a.open_file(P(DOCS / 'xss.md'))
         a.page.wait_for_timeout(800)
-        r = a.ev('''() => {
-            const root = __mdv.preview.article;
-            const bad = [...root.querySelectorAll('*')].filter(el => [...el.attributes].some(at => /^on/i.test(at.name) || at.name === 'style' || at.name === 'srcset' || /^\\s*javascript:/i.test(at.value)));
-            const srcs = [...root.querySelectorAll('img')].map(i => i.getAttribute('src')).filter(Boolean);
-            return { xss: window.__xss ?? null, bad: bad.length, banned: root.querySelectorAll('iframe,script,style,video,form,button').length, srcs };
-        }''')
+        a.wait(DIAGRAMS_DONE, 15000)
+        r = a.ev(XSS_REPORT)
         loop = [s for s in r['srcs'] if re.search(r'127\.0\.0\.1|localhost|\[::1\]', s)]
         check('NFR-SEC-01', 'XSS 페이로드 문서에서 실행 0건', r['xss'] is None and r['bad'] == 0 and r['banned'] == 0 and not a.dialogs, f'{r} dialogs={a.dialogs}')
+        check('NFR-SEC-01', 'Mermaid: 공격 다이어그램도 실행 0건, style은 다이어그램 svg 안에만, 그 CSS에 바깥 주소 없음, 상자 밖으로 안 나감',
+              r['diagrams'] == 2 and not r['leak'] and r['escaped'] == 0, f'다이어그램 {r["diagrams"]} 바깥 url {r["leak"]} 상자 밖 {r["escaped"]}')
+        shot(a, '22-xss-diagrams')
         check('NFR-SEC-02', '문서가 쓴 실행기·로컬 주소 이미지는 지운다', not loop, loop)
     guard('NFR-SEC-01', 'XSS', t_xss)
 
@@ -805,7 +944,20 @@ def run_launcher(pw, L, ctx):
         b.open_file(P(path))
         t0 = time.time()
         write(path, '# 합친 뒤 고침\n')
-        b.wait("() => __mdv.preview.article.querySelector('h1')?.textContent === '합친 뒤 고침'", 3000)
+        done = "() => __mdv.preview.article.querySelector('h1')?.textContent === '합친 뒤 고침'"
+        try:
+            b.wait(done, 3000)
+        except Exception:
+            # 실패하면 원인을 가릴 정보를 남기고, 늦게라도 반영되는지 더 기다려 본다.
+            diag = b.ev('''() => ({ active: __mdv.tabs.active()?.path, h1: __mdv.preview.article.querySelector('h1')?.textContent,
+                state: __mdv.activeDoc()?.state, version: __mdv.activeDoc()?.version, es: __mdv.bridge.source?.readyState ?? null,
+                tabs: __mdv.tabs.tabs.length, retired: document.title })''')
+            try:
+                b.wait(done, 7000)
+                late = f'{time.time() - t0:.1f}s 뒤 반영'
+            except Exception:
+                late = '10초 안에 반영 안 됨'
+            raise RuntimeError(f'3초 안에 반영 안 됨({late}) {diag} 오류={b.errors[:3]}')
         dt = time.time() - t0
         check('FR-FILE-04', '실행 7번: 마지막 뷰어 탭 하나가 모든 문서를 갖고 감시도 동작', has_all and dt < 1.0, f'탭 {len(st["tabs"])}개, 반영 {dt * 1000:.0f} ms')
         for o in olds:
@@ -877,10 +1029,15 @@ def run_launcher(pw, L, ctx):
 
     a = cur[0]
     check('NFR-REL-01', '실행 중 화면 스크립트 오류 없음', not a.errors, a.errors[:3])
+    # CSP가 보내기 전에 막은 요청(다이어그램 무대 iframe 등)은 밖으로 나가지 않았으므로 세지 않는다.
+    requests = [r.url for r in reqs if 'csp' not in (r.failure or '').lower()]
+    blocked = sorted({r.url for r in reqs if 'csp' in (r.failure or '').lower()})
     others = [u for u in requests if not (u.startswith(f'http://127.0.0.1:{port}/') or u.startswith('data:') or u.startswith('blob:')
                                          or u == 'https://example.com/remote.png')]
     stop_calls = [u for u in requests if '/api/stop' in u or 'localhost' in u or ':9/' in u]
     check('NFR-SEC-04', '실행기와 원격 이미지 외 요청 0건(문서가 쓴 루프백 주소 요청 없음)', not others and not stop_calls, (others + stop_calls)[:5])
+    check('NFR-SEC-04', 'Mermaid: 다이어그램이 부르려던 바깥 주소는 무대의 CSP가 보내기 전에 막는다',
+          any('leak' in u for u in blocked) and not any('leak' in u for u in requests), blocked[:6])
     a.page.close()
 
 
@@ -1237,6 +1394,7 @@ def run_desktop(pw):
     if not (DOCS / 'xss.md').exists():
         write_xss(17787)
     shutil.copy(DOCS / 'xss.md', docs / 'xss.md')
+    write(docs / 'diagrams.md', diagrams_text())
     profile = LOCAL / 'app-profile'
     regroot = 'Software\\MdViewer-e2e-' + uuid.uuid4().hex
     first = str(docs / '첫 문서.md')
@@ -1351,13 +1509,22 @@ def run_desktop(pw):
             v = cur[0].v
             v.open_file(str(docs / 'xss.md'))
             v.page.wait_for_timeout(800)
-            r = v.ev('''() => {
-                const root = __mdv.preview.article;
-                const bad = [...root.querySelectorAll('*')].filter(el => [...el.attributes].some(at => /^on/i.test(at.name) || at.name === 'style' || at.name === 'srcset' || /^\\s*javascript:/i.test(at.value)));
-                return { xss: window.__xss ?? null, bad: bad.length, banned: root.querySelectorAll('iframe,script,style,video,form,button').length };
-            }''')
-            check('NFR-SEC-01', 'Windows 앱: XSS 페이로드 문서에서 실행 0건', r == {'xss': None, 'bad': 0, 'banned': 0} and not v.dialogs, f'{r} {v.dialogs}')
+            v.wait(DIAGRAMS_DONE, 15000)
+            r = v.ev(XSS_REPORT)
+            got = {k: r[k] for k in ('xss', 'bad', 'banned', 'leak', 'escaped', 'diagrams')}
+            check('NFR-SEC-01', 'Windows 앱: XSS 페이로드 문서에서 실행 0건(Mermaid 포함)',
+                  got == {'xss': None, 'bad': 0, 'banned': 0, 'leak': [], 'escaped': 0, 'diagrams': 2} and not v.dialogs, f'{r} {v.dialogs}')
         guard('NFR-SEC-01', 'Windows 앱 XSS', t_xss)
+
+        def t_diagrams():
+            v = cur[0].v
+            v.open_file(str(docs / 'diagrams.md'))
+            v.wait(DIAGRAMS_DONE, 20000)
+            r = v.ev(DIAGRAM_REPORT)
+            check('FR-REN-07', 'Windows 앱: Mermaid 다이어그램을 그리고 깨진 것은 원문과 오류로, 라벨이 넘치지 않는다',
+                  diagrams_ok(r) and not r['over'] and not v.errors, {k: r[k] for k in ('n', 'widths', 'pending', 'errors', 'over')})
+            shot(v, '31-desktop-diagrams')
+        guard('FR-REN-07', 'Windows 앱 Mermaid', t_diagrams)
 
         def t_perf():
             v = cur[0].v
@@ -1490,6 +1657,20 @@ def run_standalone(pw):
             v.wait('() => __mdv.tabs.active()?.path.endsWith("/합성.md")', 5000)
             check('FR-FILE-01', '핸들 없는 파일(합성 drop)도 읽기 전용 탭으로 연다', v.h1() == '합성 문서')
         guard('FR-FILE-01', '독립 모드 합성 끌어다 놓기', t_synthetic_drop)
+
+        def t_diagrams():
+            # file://에서도 데이터 블록을 풀어 CSP 해시로 실행한다 (FR-REN-07).
+            v.ev('''(text) => {
+                const dt = new DataTransfer();
+                dt.items.add(new File([text], '다이어그램.md', { type: 'text/markdown' }));
+                document.dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
+            }''', diagrams_text())
+            v.wait('() => __mdv.tabs.active()?.path.endsWith("/다이어그램.md")', 5000)
+            v.wait(DIAGRAMS_DONE, 20000)
+            r = v.ev(DIAGRAM_REPORT)
+            check('FR-REN-07', '독립 모드(file://): Mermaid 번들을 풀어 실행하고 다이어그램을 그린다', diagrams_ok(r) and not r['over'] and not v.errors,
+                  {k: r[k] for k in ('n', 'widths', 'pending', 'errors', 'over')})
+        guard('FR-REN-07', '독립 모드 Mermaid', t_diagrams)
 
         def t_reload():
             # 핸들이 있는 위치만 세션에 남는다. 다시 열면 권한에 따라 바로 복원되거나 복원 버튼이 뜬다 (SDD 7.4).

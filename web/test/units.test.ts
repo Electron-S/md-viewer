@@ -215,6 +215,24 @@ test('미리보기 찾기: 일치 표시·순환·해제 (FR-FIND-03)', () => {
   assert.equal(v.article.textContent, '사과 바나나 사과 포도사과');
 });
 
+test('미리보기 찾기: 다이어그램 SVG 글자는 tspan으로 강조하고 스타일시트·제목은 건너뛴다 (FR-FIND-03, FR-REN-07)', () => {
+  const v = new PreviewView();
+  const box = dom.window.document.createElement('div');
+  box.className = 'mdv-mermaid';
+  box.innerHTML =
+    '<svg id="mdv-mmd-1"><style>#mdv-mmd-1 .사과 { fill: red }</style><title>사과</title><text>사과 <tspan>배</tspan></text>' +
+    '<foreignObject><div><span>사과</span></div></foreignObject></svg>';
+  v.setContent(box as unknown as Node);
+  assert.equal(v.find({ text: '사과', caseSensitive: false, wholeWord: false, regex: false }).count, 2);
+  // SVG 글자 안에 HTML <mark>를 넣으면 보이지 않는다.
+  const svgHit = v.article.querySelector('text > tspan.mdv-hit');
+  assert.equal(svgHit?.namespaceURI, 'http://www.w3.org/2000/svg');
+  assert.ok(v.article.querySelector('foreignObject mark.mdv-hit'));
+  v.clearFind();
+  assert.equal(v.article.querySelectorAll('.mdv-hit').length, 0);
+  assert.equal(v.article.querySelector('text')?.textContent, '사과 배');
+});
+
 /** 원문 줄 data-line = 0, 1, 2 …인 최상위 블록들. 블록 사이에는 렌더러처럼 줄 바꿈 글자를 둔다. */
 function blocks(tags: string[]): DocumentFragment {
   const doc = dom.window.document;

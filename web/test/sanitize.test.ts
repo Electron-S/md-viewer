@@ -1,7 +1,8 @@
 import { dom } from './dom';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createSanitizer, type SanitizeContext } from '../src/render/sanitize';
+import { readFileSync } from 'node:fs';
+import { createSanitizer, isLocalCssValue, type SanitizeContext } from '../src/render/sanitize';
 import { createMarkdown, renderMarkdown } from '../src/render/markdown';
 
 const s = createSanitizer(dom.window as unknown as Window);
@@ -185,4 +186,81 @@ test('앞머리 상자는 정제 뒤에도 접을 수 있는 상자로 남는다
   assert.equal(box.querySelector('summary')?.textContent, '메타데이터');
   assert.equal(box.querySelector('td')?.textContent, '<img src=x onerror=alert(1)>');
   assert.equal(box.querySelector('img'), null);
+});
+
+test('다이어그램 상자는 문서 정제 뒤에도 원문과 함께 남는다 (FR-REN-07)', () => {
+  const { html } = renderMarkdown(createMarkdown(), '```mermaid\nA["<img src=x onerror=alert(1)>"]\n```\n');
+  const root = clean(html);
+  assert.equal(root.querySelector('div.mdv-mermaid[data-line="0"] > pre > code.language-mermaid')?.textContent, 'A["<img src=x onerror=alert(1)>"]\n');
+  assert.equal(root.querySelector('img'), null);
+});
+
+/** mermaid 12.2.0이 Edge에서 그린 실제 결과 (flowchart, sequence, state, mindmap, sankey, ELK flowchart) */
+const MERMAID_SVG: { name: string; id: string; svg: string }[] = JSON.parse(readFileSync('tests/samples/mermaid-svg.json', 'utf8')).diagrams;
+
+function parseHtml(markup: string): Element {
+  const t = dom.window.document.createElement('template');
+  t.innerHTML = markup;
+  return t.content.firstElementChild as unknown as Element;
+}
+
+const shape = (root: Element) => {
+  const els = [root, ...Array.from(root.querySelectorAll('*'))];
+  return { elements: els.map((e) => e.localName).join(' '), attrs: els.map((e) => Array.from(e.attributes, (a) => a.name).sort().join(',')) };
+};
+
+test('Mermaid SVG 정제: 실제 그린 결과는 요소·속성을 하나도 잃지 않는다 (FR-REN-07)', () => {
+  for (const d of MERMAID_SVG) {
+    const svg = s.sanitizeDiagram(d.svg, d.id);
+    assert.ok(svg, d.name);
+    const before = shape(parseHtml(d.svg));
+    const after = shape(svg as unknown as Element);
+    assert.equal(after.elements, before.elements, d.name);
+    assert.deepEqual(after.attrs, before.attrs, d.name);
+    // 스타일시트의 규칙도 그대로 남는다(모두 #id로 시작하고 바깥 주소가 없다).
+    const rules = (css: string) => {
+      const sheet = new dom.window.CSSStyleSheet();
+      sheet.replaceSync(css);
+      return sheet.cssRules.length;
+    };
+    const css = parseHtml(d.svg).querySelector('style')!.textContent!;
+    assert.equal(rules(svg.querySelector('style')!.textContent!), rules(css), d.name);
+  }
+});
+
+test('Mermaid SVG 정제: 스크립트·이벤트·바깥 주소·다이어그램 밖 CSS를 지운다 (FR-REN-07, NFR-SEC-01)', () => {
+  const id = 'mdv-mmd-9';
+  const evil =
+    `<svg id="${id}" xmlns="http://www.w3.org/2000/svg" onload="alert(1)" style="max-width: 10px; background: url(https://e.example/a.png)">` +
+    `<style>#${id} {fill: red; background: url("https://e.example/b.png")} #${id} .n {filter: url(#${id}-shadow)} .markdown-body {display: none}` +
+    ` #${id} .a, body {color: red} #${id}x {color: blue} @import url(https://e.example/c.css); @font-face {font-family: x; src: url(https://e.example/f.woff)}` +
+    ` #${id} .e {background: u\\72l(https://e.example/d.png)} #${id} .f {background: image-set("https://e.example/s.png" 1x)}</style>` +
+    `<script>alert(2)</script><a href="javascript:alert(3)"><text>a</text></a><a xlink:href="https://e.example/x"><text>b</text></a>` +
+    `<g filter="url(#${id}-shadow)" fill="url(https://e.example/g.svg#x)"><rect onclick="alert(4)" width="1" height="1"/></g>` +
+    `<image href="https://e.example/i.png"/><use href="https://e.example/u.svg#a"/><animate attributeName="href" to="javascript:alert(5)"/>` +
+    `<foreignObject><div xmlns="http://www.w3.org/1999/xhtml"><span class="nodeLabel"><p>라벨</p><img src="https://e.example/h.png">` +
+    `<style>.markdown-body{display:none}</style><a href="https://e.example/l">l</a><span data-mdv-ext="https://e.example/m">x</span></span></div></foreignObject></svg>`;
+  const svg = s.sanitizeDiagram(evil, id)!;
+  assert.ok(svg);
+  assert.doesNotMatch(svg.outerHTML, /e\.example|javascript:|onload|onclick|<script|<image|<use|<animate|<img|data-mdv/i);
+  assert.equal(svg.querySelectorAll('style').length, 1, '라벨 안 <style>은 지운다');
+  const css = svg.querySelector('style')!.textContent!;
+  assert.match(css, /fill: red/);
+  assert.match(css, new RegExp(`filter: url\\("?#${id}-shadow"?\\)`));
+  assert.doesNotMatch(css, /markdown-body|body|color: blue|@import|@font-face/);
+  assert.equal(svg.querySelector('p')?.textContent, '라벨');
+  assert.equal(svg.querySelector('g')?.getAttribute('filter'), `url(#${id}-shadow)`);
+  assert.equal(svg.querySelector('g')?.hasAttribute('fill'), false);
+  // 줄임 속성(background)의 그림만 지운다. 남는 세부 속성의 글자 모양은 CSS 구현마다 다르다.
+  assert.match(svg.getAttribute('style')!, /^max-width: 10px;/);
+  // 기대한 모양(그 id의 svg 하나)이 아니면 받지 않는다.
+  assert.equal(s.sanitizeDiagram(evil, 'mdv-mmd-8'), null);
+  assert.equal(s.sanitizeDiagram('<div id="x"></div>', 'x'), null);
+});
+
+test('CSS 값의 url()은 문서 안 #조각만 허용한다 (FR-REN-07)', () => {
+  for (const v of ['red', 'url(#a)', 'url( "#a" )', "url('#a') no-repeat", 'url(#a), url(#b)']) assert.equal(isLocalCssValue(v), true, v);
+  for (const v of ['url(https://e.example/x.png)', "url('x.png')", 'url(#a), url(b.png)', 'image-set("a.png" 1x)', '-webkit-image-set(url(#a) 1x)', 'cross-fade(url(#a), url(#b))']) {
+    assert.equal(isLocalCssValue(v), false, v);
+  }
 });

@@ -14,7 +14,8 @@
 .markdown-body > .mdv-chunk:first-child > :first-child { margin-top: 0 !important; }
 /* 큰 문서에서 화면 밖 블록의 배치·그리기를 건너뛴다 (NFR-PERF-02). 크기는 한 번 그린 뒤 기억된다.
    블록은 수십 개씩 묶음(.mdv-chunk, chunkBlocks)에 들어 있어 묶음 단위로 건너뛴다. 자리 크기는 블록당 4em × 64개로 잡는다.
-   묶음마다 크기를 inline style로 주지 않는다. 미리보기에는 style 속성이 하나도 없어야 한다(NFR-SEC-01 시험이 확인한다). */
+   묶음마다 크기를 inline style로 주지 않는다. 미리보기에는 style 속성이 하나도 없어야 한다(NFR-SEC-01 시험이 확인한다).
+   예외는 Mermaid 다이어그램 상자(.mdv-mermaid) 안의 svg뿐이다. 그 안은 따로 정제해 다이어그램 밖을 꾸미지 못한다(FR-REN-07). */
 .markdown-body > * { content-visibility: auto; contain-intrinsic-size: auto 4em; }
 .markdown-body > .mdv-chunk { contain-intrinsic-size: auto 256em; }
 .markdown-body h1, .markdown-body h2, .markdown-body h3, .markdown-body h4, .markdown-body h5, .markdown-body h6 {
@@ -68,6 +69,17 @@
 .markdown-body details.mdv-front-matter[open] > summary { margin-bottom: 8px; }
 .markdown-body details.mdv-front-matter > table, .markdown-body details.mdv-front-matter > pre { margin: 0; }
 .markdown-body details.mdv-front-matter th { text-align: left; vertical-align: top; white-space: nowrap; }
+
+/* Mermaid 다이어그램 (FR-REN-07). 그리기 전에는 원문 코드(pre)가, 그린 뒤에는 정제한 svg가 들어 있다.
+   contain: 다이어그램 안의 style이 position:fixed 등으로 상자 밖(앱 화면)을 덮지 못하게 가둔다. */
+.markdown-body .mdv-mermaid { margin: 0 0 16px; contain: layout paint; }
+.markdown-body .mdv-mermaid > svg { display: block; margin: 0 auto; max-width: 100%; height: auto; }
+/* 라벨은 무대 iframe(render/diagrams.ts STAGE_HTML)에서 잰 크기대로 그려져야 한다. 본문 규칙이 라벨 HTML에 붙지 않게 되돌린다. */
+.markdown-body .mdv-mermaid foreignObject * { line-height: 1.5; }
+.markdown-body .mdv-mermaid foreignObject code { padding: 0; font: inherit; background: none; border-radius: 0; }
+.markdown-body .mdv-mermaid foreignObject p { margin: 0; }
+.mdv-mermaid tspan.mdv-hit { fill: var(--find-svg-hit, #bc4c00) !important; font-weight: 700; text-decoration: underline; }
+.mdv-mermaid tspan.mdv-hit.mdv-current { fill: var(--find-svg-current, #d1242f) !important; }
 
 .markdown-body .footnotes { font-size: 0.85em; color: var(--md-muted); }
 .markdown-body .footnotes-sep { height: 1px; background: var(--md-border); border: 0; margin-top: 32px; }

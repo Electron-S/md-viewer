@@ -103,6 +103,8 @@ const ko = {
     renderLarge: '미리보기 그리기',
     docFailed: (msg: string) => `이 문서를 렌더링하지 못해 원문을 표시합니다: ${msg}`,
     blockFailed: (msg: string) => `이 블록을 렌더링하지 못해 원문을 표시합니다: ${msg}`,
+    /** Mermaid 다이어그램을 그리지 못했을 때 (FR-REN-07) */
+    diagramFailed: (msg: string) => `이 다이어그램을 그리지 못해 원문을 표시합니다: ${msg}`,
     /** 문서 앞머리(YAML front matter) 상자의 제목 (FR-REN-08) */
     frontMatter: '메타데이터',
     needFolder: '이 문서의 상대 경로 이미지·링크를 보려면 문서가 든 폴더를 여세요.',
@@ -170,6 +172,8 @@ const ko = {
     badPath: '열 수 없는 위치입니다',
     offline: '실행기에 연결할 수 없습니다. mdview로 다시 열어 주세요.',
     sourceModuleMissing: '원문 보기 모듈이 없습니다',
+    diagramModuleMissing: '다이어그램(Mermaid) 모듈이 없습니다',
+    diagramInvalid: '다이어그램 결과가 올바른 SVG가 아닙니다',
     missingElement: (id: string) => `#${id} 없음`,
   },
 
@@ -179,6 +183,8 @@ const ko = {
     reloadFailed: (path: string, msg: string) => `다시 읽기 실패: ${path} ${msg}`,
     renderFailed: (path: string, msg: string) => `렌더링 실패: ${path} ${msg}`,
     blockFailed: (path: string, line: number, msg: string) => `블록 렌더링 실패: ${path}:${line + 1} ${msg}`,
+    diagramFailed: (path: string, line: number, msg: string) => `다이어그램 실패: ${path}:${line + 1} ${msg}`,
+    diagramModuleFailed: (msg: string) => `다이어그램 모듈을 불러오지 못함: ${msg}`,
   },
 
 };

@@ -196,8 +196,11 @@ button:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--accent
 .toast { background: var(--bg-chrome); border: 1px solid var(--line); border-radius: 6px; padding: 8px 12px; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.15); max-width: 480px; }
 .toast.error { border-color: #d1242f; }
 
+/* Mermaid 다이어그램을 그리는 숨은 무대 iframe (FR-REN-07, render/diagrams.ts). 글꼴은 iframe 문서 안에서 맞춘다. */
+.mdv-mermaid-stage { position: fixed; left: -100000px; top: 0; height: 100vh; border: 0; visibility: hidden; pointer-events: none; }
+
 /* 인쇄 (FR-EXP-01): 미리보기만 인쇄한다. */
 @media print {
   html, body, #app, #body, #main, #views, .pane.preview, .preview-scroll { display: block !important; height: auto !important; overflow: visible !important; }
-  #menubar, #tabbar, #side, #resizer, #statusbar, #find-slot, #empty, .pane.source, .toast-box, .preview-notice { display: none !important; }
+  #menubar, #tabbar, #side, #resizer, #statusbar, #find-slot, #empty, .pane.source, .toast-box, .preview-notice, .mdv-mermaid-stage { display: none !important; }
 }

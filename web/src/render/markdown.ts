@@ -35,6 +35,13 @@ function highlight(code: string, info: string): string {
   return hljs.highlight(code, { language: lang, ignoreIllegals: true }).value;
 }
 
+/** Mermaid 다이어그램 상자 (FR-REN-07). 그리기 전에는 `pre`를, 그린 뒤에는 정제한 `svg`를 담는다. */
+export const DIAGRAM_CLASS = 'mdv-mermaid';
+
+function isMermaidInfo(info: string): boolean {
+  return (info || '').trim().split(/\s+/)[0].toLowerCase() === 'mermaid';
+}
+
 const WWW_TAIL = /^[\p{L}\p{N}_-]+(?:\.[\p{L}\p{N}_-]+)+(?:[/?#][^\s<]*)?/u;
 
 /** GFM 규칙: 끝의 문장부호, 짝이 안 맞는 닫는 괄호, 엔티티 모양(`&hl;`) 꼬리는 링크에서 뺀다. */
@@ -132,6 +139,16 @@ export function createMarkdown(opts: MarkdownOptions = {}): MarkdownIt {
         ? `<table>\n<tbody>\n${rows.map(([k, v]) => `<tr><th>${esc(k)}</th><td>${esc(v)}</td></tr>\n`).join('')}</tbody>\n</table>\n`
         : `<pre class="mdv-plain">${esc(t.content)}</pre>\n`;
       return `<details class="mdv-front-matter"${self.renderAttrs(t)} open>\n<summary>${esc(S.preview.frontMatter)}</summary>\n${body}</details>\n`;
+    };
+    // Mermaid 펜스는 원문 코드를 상자에 담아 둔다. 미리보기가 그린 뒤 상자 안을 다이어그램으로 바꾼다 (FR-REN-07, render/diagrams.ts).
+    // 상자가 data-line을 가져 스크롤 동기화의 기준점이 되고, 그리기 전·실패 때는 원문이 보인다.
+    const fence = md.renderer.rules.fence!;
+    md.renderer.rules.fence = (tokens, idx, options, env, self) => {
+      const t = tokens[idx];
+      if (!isMermaidInfo(t.info)) return fence(tokens, idx, options, env, self);
+      const line = t.attrGet('data-line');
+      const attr = line == null ? '' : ` data-line="${md.utils.escapeHtml(String(line))}"`;
+      return `<div class="${DIAGRAM_CLASS}"${attr}><pre><code class="language-mermaid">${md.utils.escapeHtml(t.content)}</code></pre></div>\n`;
     };
     md.core.ruler.push('mdv_gfm', (state) => {
       for (const t of state.tokens) {

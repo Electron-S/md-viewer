@@ -104,6 +104,20 @@ test('앞머리(front matter)는 제목이 아니라 접을 수 있는 키·값 
   assert.equal(plain.render('---\nname: x\n---\n'), '<hr />\n<h2>name: x</h2>\n');
 });
 
+test('mermaid 펜스는 원문 코드를 담은 다이어그램 상자로 그린다 (FR-REN-07)', () => {
+  const md = createMarkdown();
+  const out = renderMarkdown(md, '앞\n\n```mermaid\nflowchart LR\n  A["<b>x</b>"] --> B\n```\n\n~~~ Mermaid 제목\nsequenceDiagram\n~~~\n');
+  assert.match(
+    out.html,
+    /<div class="mdv-mermaid" data-line="2"><pre><code class="language-mermaid">flowchart LR\n {2}A\[&quot;&lt;b&gt;x&lt;\/b&gt;&quot;\] --&gt; B\n<\/code><\/pre><\/div>\n/,
+  );
+  assert.match(out.html, /<div class="mdv-mermaid" data-line="7"><pre><code class="language-mermaid">sequenceDiagram\n<\/code><\/pre><\/div>/);
+  // 다른 언어는 그대로 코드 블록. GFM 확장을 끈 렌더러(스펙 시험)도 CommonMark대로
+  assert.match(renderMarkdown(md, '```mermaidx\na\n```\n').html, /^<pre><code data-line="0" class="language-mermaidx">/);
+  const plain = createMarkdown({ sourceMap: false, extensions: false, highlight: false });
+  assert.equal(plain.render('```mermaid\na\n```\n'), '<pre><code class="language-mermaid">a\n</code></pre>\n');
+});
+
 test('비정상 입력에서도 멈추지 않는다 (NFR-REL-01)', () => {
   const md = createMarkdown();
   const cases = {
