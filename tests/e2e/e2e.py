@@ -890,8 +890,44 @@ def run_launcher(pw, L, ctx):
         a.key('Control+b')
         hid = a.ev('() => document.getElementById("side").hidden')
         a.key('Control+b')
-        check('FR-NAV-01', 'Ctrl+B 사이드 패널', vis and hid)
+        check('FR-NAV-01', 'Ctrl+B 왼쪽 패널', vis and hid)
     guard('NFR-USE-01', '메뉴·단축키', t_menu_shortcuts)
+
+    def t_panels():
+        # 목차는 문서 오른쪽 패널, 왼쪽 패널은 작업 공간이고 '왼쪽 목록' 설정이면 그 위에 열린 파일 목록을 둔다.
+        a = cur[0]
+        side, main, toc = (a.page.locator(s).bounding_box() for s in ('#side', '#main', '#toc-side'))
+        check('FR-NAV-01', '목차는 문서 오른쪽, 작업 공간은 왼쪽 패널',
+              side['x'] + side['width'] <= main['x'] + 1 and toc['x'] >= main['x'] + main['width'] - 1 and a.page.locator('#toc-side .toc-item').count() > 0
+              and a.page.locator('#side #ws-body .workspace').count() == 1, f'side={side} main={main} toc={toc}')
+        a.key('Control+Alt+b')
+        hid = a.ev('() => document.getElementById("toc-side").hidden')
+        a.key('Control+Alt+b')
+        check('FR-NAV-01', 'Ctrl+Alt+B 목차 패널', hid and not a.ev('() => document.getElementById("toc-side").hidden'))
+        n = len(a.state()['tabs'])
+        a.ev('() => __mdv.cmds.run("view.openFiles.list")')
+        a.settle()
+        r = a.ev('''() => ({
+            list: !!document.querySelector('#side #open-files:not([hidden]) #tabbar.vertical'),
+            items: document.querySelectorAll('#open-files .tab').length,
+            listBottom: document.getElementById('open-files').getBoundingClientRect().bottom,
+            wsTop: document.getElementById('ws-section').getBoundingClientRect().top,
+            saved: __mdv.settings.openFiles,
+        })''')
+        item = a.page.locator('#open-files .tab:not(.active):not(.deleted)').first
+        name = item.locator('.tab-name').inner_text()
+        item.click()
+        a.settle()
+        picked = a.state()['active'].endswith('/' + name)
+        shot(a, '04-open-files-list')
+        a.ev('() => __mdv.cmds.run("view.openFiles.tabs")')
+        a.settle()
+        back = a.ev('''() => { const bar = document.getElementById('tabbar');
+            return bar.parentElement.id === 'app' && !bar.classList.contains('vertical') && document.getElementById('open-files').hidden; }''')
+        check('FR-FILE-05', '열린 파일 표시: 왼쪽 패널 위 목록(아래 작업 공간)에서 고르기 ↔ 위쪽 탭',
+              r['list'] and r['items'] == n and r['listBottom'] <= r['wsTop'] + 1 and r['saved'] == 'list' and picked and back,
+              f'{r} 고른 파일={name} 열림={picked} 탭 복귀={back}')
+    guard('FR-FILE-05', '패널 배치·열린 파일 목록', t_panels)
 
     def t_second_launch():
         # 실행 중에 다시 부르면 같은 실행기를 쓰고, 새 뷰어 탭이 이전 탭의 문서를 넘겨받는다 (FR-FILE-04, SDD 7.3).
@@ -1093,7 +1129,18 @@ def compare_session(a, before, rid, how):
 
 
 def shuffle(a, modes, shift, base, step, active):
-    lines = [set_tab(a, i, modes[(i + shift) % 3], base + i * step) for i in range(10)]
+    lines = []
+    for i in range(10):
+        mode, px = modes[(i + shift) % 3], base + i * step
+        line = set_tab(a, i, mode, px)
+        # 보기 모드·패널 너비에 따라 글줄 폭이 달라, 다른 탭이 거의 같은 줄에 설 수 있다.
+        # 그러면 복원이 탭끼리 뒤섞여도 가려내지 못하므로 조금 더 내려 다른 줄을 잡는다.
+        for _ in range(5):
+            if all(abs(line - x) >= 1 for x in lines):
+                break
+            px += 90
+            line = set_tab(a, i, mode, px)
+        lines.append(line)
     a.ev('(i) => __mdv.tabs.activate(__mdv.tabs.tabs[i].id)', active)
     a.settle()
     a.page.wait_for_timeout(1200)  # 세션 자동 저장(500 ms 디바운스)이 끝날 시간
@@ -1119,6 +1166,13 @@ def run_session10(pw, ctx):
     a.page.mouse.move(x + 90, y, steps=6)
     a.page.mouse.up()
     width = a.ev('() => __mdv.session.sidePanel.width')
+    box = a.page.locator('#toc-resizer').bounding_box()
+    x, y = box['x'] + box['width'] / 2, box['y'] + box['height'] / 2
+    a.page.mouse.move(x, y)
+    a.page.mouse.down()
+    a.page.mouse.move(x - 70, y, steps=6)
+    a.page.mouse.up()
+    toc_width = a.ev('() => __mdv.session.tocPanel.width')
     a.page.wait_for_timeout(800)
     before = a.state()
     check('FR-SESS-01', '세션 시험 준비: 탭 10개, 서로 다른 줄', len(before['tabs']) == 10 and len({round(v, 1) for v in lines}) == 10 and min(lines) > 3,
@@ -1130,16 +1184,20 @@ def run_session10(pw, ctx):
     compare_session(a, before, 'FR-SESS-01', '새로 고침')
     side = a.ev('() => ({ visible: !document.getElementById("side").hidden, width: Math.round(document.getElementById("side").getBoundingClientRect().width) })')
     check('FR-SESS-02', '사이드 패널 열림 상태·너비 기억', side['visible'] and abs(side['width'] - width) <= 1, f'{width} → {side}')
+    toc = a.ev('() => ({ visible: !document.getElementById("toc-side").hidden, width: Math.round(document.getElementById("toc-side").getBoundingClientRect().width) })')
+    check('FR-SESS-02', '목차 패널 열림 상태·너비 기억', toc['visible'] and toc_width > 240 and abs(toc['width'] - toc_width) <= 1, f'{toc_width} → {toc}')
 
     # 2) 브라우저 탭 닫기 → 토큰만 있는 주소로 다시 열기
     shuffle(a, modes, 1, 300, 310, 7)
     a.key('Control+b')
+    a.key('Control+Alt+b')
     a.page.wait_for_timeout(800)
     before = a.state()
     a.page.close()
     a = Viewer.open(ctx, L.url())
     compare_session(a, before, 'FR-SESS-01', '브라우저 탭 닫기')
     check('FR-SESS-02', '사이드 패널 닫힘 상태 기억', a.ev('() => document.getElementById("side").hidden') is True)
+    check('FR-SESS-02', '목차 패널 닫힘 상태 기억', a.ev('() => document.getElementById("toc-side").hidden') is True)
 
     # 3) 렌더러 충돌: 마지막 자동 저장만 믿는다 (NFR-REL-02)
     shuffle(a, modes, 2, 500, 200, 2)
@@ -1170,6 +1228,15 @@ def run_session10(pw, ctx):
     a.page.close()
     a = Viewer.open(ctx, L.url())
     compare_session(a, before, 'FR-SESS-01', '실행기 재시작')
+
+    # 5) 열린 파일 표시 설정은 다시 열어도 남고, 목록으로 바꾸면 숨겨 둔 왼쪽 패널을 연다
+    a.ev('() => __mdv.cmds.run("view.openFiles.list")')
+    shown = a.ev('() => !document.getElementById("side").hidden')
+    a.page.wait_for_timeout(800)
+    a.page.reload()
+    a.page.wait_for_selector('body[data-restored="1"]', timeout=30000)
+    kept = a.ev('() => document.querySelectorAll("#open-files:not([hidden]) #tabbar.vertical .tab").length')
+    check('FR-SESS-02', '열린 파일 표시(왼쪽 목록) 설정 기억', shown and kept == 10, f'패널 열림={shown} 목록 항목={kept}')
     a.page.close()
     L.stop()
 

@@ -1,5 +1,5 @@
 // MD Viewer 빌드 (SDD 9.2). Node.js만 있으면 어느 OS에서나 돈다.
-//   1) 타입 검사  2) 뷰어 HTML 하나  3) 실행기 mdview.mjs  4) 스킬 묶음과 zip  5) 크기 검사  6) Windows 앱
+//   1) 타입 검사  2) 뷰어 HTML 하나  3) 실행기 mdview.mjs  4) 스킬 묶음  5) 크기 검사  6) Windows 앱  7) 배포 zip
 import * as esbuild from 'esbuild';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
@@ -98,13 +98,11 @@ copyFileSync('dist/viewer.html', 'dist/mdview/viewer.html');
 copyFileSync('skill/SKILL.md', 'dist/mdview/SKILL.md');
 copyFileSync('LICENSE', 'dist/mdview/LICENSE');
 copyFileSync('dist/THIRD-PARTY-NOTICES.txt', 'dist/mdview/THIRD-PARTY-NOTICES.txt');
-const zipPath = `dist/mdview-${VERSION}.zip`;
-writeFileSync(zipPath, makeZip('dist/mdview', 'mdview'));
 
 console.log('== 5. 크기 검사 (NFR-PORT-03)');
 const viewerSize = statSync('dist/viewer.html').size;
 const bundleSize = readdirSync('dist/mdview').reduce((n, f) => n + statSync(join('dist/mdview', f)).size, 0);
-console.log(`viewer.html ${(viewerSize / 1024).toFixed(0)} KB, mdview/ ${(bundleSize / 1024).toFixed(0)} KB, ${zipPath} ${(statSync(zipPath).size / 1024).toFixed(0)} KB`);
+console.log(`viewer.html ${(viewerSize / 1024).toFixed(0)} KB, mdview/ ${(bundleSize / 1024).toFixed(0)} KB`);
 if (viewerSize > MAX_VIEWER) throw new Error(`viewer.html이 ${MAX_VIEWER / MIB} MiB를 넘습니다`);
 if (bundleSize > MAX_BUNDLE) throw new Error(`스킬 묶음이 ${MAX_BUNDLE / MIB} MiB를 넘습니다`);
 
@@ -118,6 +116,20 @@ if (exe) {
 } else {
   console.log('csc.exe가 없어 건너뜀 (Windows나 WSL에서 빌드하세요)');
 }
+
+console.log('== 7. 배포 zip');
+// 릴리스 zip 하나에 Windows 앱·뷰어·스킬 폴더를 모두 넣는다. 푼 폴더에서 `node mdview/mdview.mjs --install-skill`로 스킬도 설치한다.
+const zipPath = `dist/md-viewer-${VERSION}.zip`;
+const zipFiles = [
+  ...(exe ? [['MDViewer.exe', 'dist/MDViewer.exe']] : []),
+  ['viewer.html', 'dist/viewer.html'],
+  ['README.md', 'README.md'],
+  ['LICENSE', 'LICENSE'],
+  ['THIRD-PARTY-NOTICES.txt', 'dist/THIRD-PARTY-NOTICES.txt'],
+  ...readdirSync('dist/mdview').sort().map((f) => [`mdview/${f}`, join('dist/mdview', f)]),
+];
+writeFileSync(zipPath, makeZip(zipFiles));
+console.log(`${zipPath} ${(statSync(zipPath).size / 1024).toFixed(0)} KB${exe ? '' : ' (MDViewer.exe 없음)'}`);
 console.log('== 완료');
 
 /**
@@ -150,8 +162,8 @@ function writeNotices(builds) {
   writeFileSync('dist/THIRD-PARTY-NOTICES.txt', `${base}${rule}${intro}${rule}${sections.join(rule)}\n`);
 }
 
-/** 폴더 하나를 zip으로 묶는다(deflate). 별도 도구 없이 Node 표준 라이브러리만 쓴다. */
-function makeZip(dir, prefix) {
+/** [zip 안 이름, 파일 경로] 목록을 zip으로 묶는다(deflate). 별도 도구 없이 Node 표준 라이브러리만 쓴다. */
+function makeZip(files) {
   const crcTable = Array.from({ length: 256 }, (_, n) => {
     let c = n;
     for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
@@ -165,10 +177,10 @@ function makeZip(dir, prefix) {
   const locals = [];
   const centrals = [];
   let offset = 0;
-  for (const name of readdirSync(dir).sort()) {
-    const data = readFileSync(join(dir, name));
+  for (const [name, path] of files) {
+    const data = readFileSync(path);
     const packed = deflateRawSync(data, { level: 9 });
-    const fname = Buffer.from(`${prefix}/${name}`, 'utf8');
+    const fname = Buffer.from(name, 'utf8');
     const crc = crc32(data);
     const local = Buffer.alloc(30);
     local.writeUInt32LE(0x04034b50, 0);

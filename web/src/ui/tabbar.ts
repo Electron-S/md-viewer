@@ -5,10 +5,14 @@ import type { TabManager } from '../tabs';
 
 const DRAG_TYPE = 'application/x-mdv-tab';
 
-/** 탭 바 (FR-FILE-05). 끌어서 순서 바꾸기, 가운데 클릭으로 닫기. */
+/**
+ * 탭 바 (FR-FILE-05). 끌어서 순서 바꾸기, 가운데 클릭으로 닫기.
+ * 세로로 두면 Notepad++의 문서 목록처럼 왼쪽 패널에 한 줄에 하나씩 늘어놓는다.
+ */
 export class TabBar {
   onClose: (id: number) => void = () => {};
   onOpenDialog: () => void = () => {};
+  private vertical = false;
 
   constructor(
     private el: HTMLElement,
@@ -18,7 +22,7 @@ export class TabBar {
   ) {
     el.setAttribute('role', 'tablist');
     el.addEventListener('wheel', (e) => {
-      if (e.ctrlKey) return;
+      if (e.ctrlKey || this.vertical) return;
       el.scrollLeft += e.deltaY || e.deltaX;
     }, { passive: true });
     el.addEventListener('dblclick', (e) => {
@@ -39,7 +43,8 @@ export class TabBar {
       let to = nodes.length;
       for (let i = 0; i < nodes.length; i++) {
         const r = nodes[i].getBoundingClientRect();
-        if (e.clientX < r.left + r.width / 2) {
+        const before = this.vertical ? e.clientY < r.top + r.height / 2 : e.clientX < r.left + r.width / 2;
+        if (before) {
           to = i;
           break;
         }
@@ -48,6 +53,12 @@ export class TabBar {
       if (from >= 0 && from < to) to--;
       this.tabs.move(id, to);
     });
+  }
+
+  setVertical(on: boolean) {
+    this.vertical = on;
+    this.el.classList.toggle('vertical', on);
+    this.el.setAttribute('aria-orientation', on ? 'vertical' : 'horizontal');
   }
 
   render() {

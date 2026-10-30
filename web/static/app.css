@@ -118,15 +118,31 @@ button:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--accent
 .tab-close { background: none; border: none; padding: 0 5px; line-height: 18px; border-radius: 3px; color: var(--fg-muted); }
 .tab-close:hover { background: var(--bg-hover); color: var(--fg); }
 
-/* 본문 */
+/* 열린 파일 목록 (설정 '왼쪽 목록'). 탭 줄을 왼쪽 패널로 옮겨 세로로 늘어놓는다. */
+#tabbar.vertical { flex: 1; flex-direction: column; gap: 0; padding: 2px 0; min-height: 0; background: none; border-bottom: none; overflow-x: hidden; overflow-y: auto; }
+#tabbar.vertical .tab { max-width: none; padding: 2px 4px 2px 10px; border: none; border-radius: 0; background: none; color: var(--fg); }
+#tabbar.vertical .tab:hover { background: var(--bg-hover); }
+#tabbar.vertical .tab.active { background: var(--bg-active); box-shadow: inset 3px 0 0 var(--accent); }
+#tabbar.vertical .tab-name { flex: 1; }
+#tabbar.vertical .tab-close { visibility: hidden; }
+#tabbar.vertical .tab:hover .tab-close, #tabbar.vertical .tab.active .tab-close { visibility: visible; }
+
+/* 본문: 왼쪽 패널(열린 파일 목록·작업 공간) | 문서 | 오른쪽 패널(목차) */
 #body { flex: 1; display: flex; min-height: 0; }
-#side { display: flex; flex-direction: column; width: 240px; flex: none; background: var(--bg-chrome); border-right: 1px solid var(--line); min-width: 0; }
-.side-tabs { display: flex; border-bottom: 1px solid var(--line); flex: none; }
-.side-tab { flex: 1; background: none; border: none; border-radius: 0; padding: 6px 0; color: var(--fg-muted); }
-.side-tab.active { color: var(--fg); font-weight: 600; box-shadow: inset 0 -2px 0 var(--accent); }
-#side-content { flex: 1; overflow: auto; min-height: 0; }
-#resizer { width: 5px; margin-left: -3px; cursor: col-resize; flex: none; z-index: 2; }
-#resizer:hover { background: var(--accent); opacity: 0.4; }
+#side, #toc-side { display: flex; flex-direction: column; width: 240px; flex: none; background: var(--bg-chrome); min-width: 0; }
+#side { border-right: 1px solid var(--line); }
+#toc-side { border-left: 1px solid var(--line); }
+.side-head { flex: none; padding: 5px 10px; border-bottom: 1px solid var(--line); color: var(--fg-muted); font-size: 12px; font-weight: 600; user-select: none; }
+.side-section { display: flex; flex-direction: column; min-height: 0; }
+.side-section.grow { flex: 1; }
+.side-body { flex: 1; overflow: auto; min-height: 0; }
+/* 아래 작업 공간이 머리줄과 몇 줄은 보이게 남긴다. */
+#open-files { flex: none; height: 200px; min-height: 60px; max-height: calc(100% - 90px); border-bottom: 1px solid var(--line); }
+#side-split { height: 5px; margin: -3px 0 -2px; cursor: row-resize; flex: none; z-index: 2; }
+.resizer { width: 5px; cursor: col-resize; flex: none; z-index: 2; }
+#resizer { margin-left: -3px; }
+#toc-resizer { margin-right: -3px; }
+.resizer:hover, #side-split:hover { background: var(--accent); opacity: 0.4; }
 
 .toc ul, .workspace ul { list-style: none; margin: 0; padding: 4px 0; }
 .toc-item, .ws-item {
@@ -202,5 +218,5 @@ button:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--accent
 /* 인쇄 (FR-EXP-01): 미리보기만 인쇄한다. */
 @media print {
   html, body, #app, #body, #main, #views, .pane.preview, .preview-scroll { display: block !important; height: auto !important; overflow: visible !important; }
-  #menubar, #tabbar, #side, #resizer, #statusbar, #find-slot, #empty, .pane.source, .toast-box, .preview-notice, .mdv-mermaid-stage { display: none !important; }
+  #menubar, #tabbar, #side, #resizer, #toc-side, #toc-resizer, #statusbar, #find-slot, #empty, .pane.source, .toast-box, .preview-notice, .mdv-mermaid-stage { display: none !important; }
 }

@@ -16,16 +16,22 @@ export interface SessionData {
   tabs: SessionTab[];
   activeIndex: number;
   workspace: string | null;
-  sidePanel: { visible: boolean; tab: 'toc' | 'workspace'; width: number };
+  /** 왼쪽 패널: 열린 파일 목록(설정이 목록일 때, 위)과 작업 공간(아래). listHeight는 위 목록의 높이(px). */
+  sidePanel: { visible: boolean; width: number; listHeight: number };
+  /** 오른쪽 패널: 목차 */
+  tocPanel: { visible: boolean; width: number };
   recentFiles: string[];
   recentFolders: string[];
 }
 
 export type Theme = 'light' | 'dark' | 'system';
+/** 열린 파일을 위쪽 탭 줄로 보일지, 왼쪽 패널의 목록으로 보일지 */
+export type OpenFilesView = 'tabs' | 'list';
 
 export interface Settings {
   schemaVersion: number;
   theme: Theme;
+  openFiles: OpenFilesView;
   zoom: number;
   wordWrap: boolean;
   allowRemoteImages: boolean;
@@ -38,6 +44,9 @@ export interface Settings {
 
 export const ZOOM_MIN = 50;
 export const ZOOM_MAX = 300;
+export const PANEL_MIN = 160;
+export const PANEL_MAX = 600;
+export const LIST_MIN = 60;
 
 export function defaultSession(): SessionData {
   return {
@@ -45,7 +54,8 @@ export function defaultSession(): SessionData {
     tabs: [],
     activeIndex: 0,
     workspace: null,
-    sidePanel: { visible: true, tab: 'toc', width: 240 },
+    sidePanel: { visible: true, width: 240, listHeight: 200 },
+    tocPanel: { visible: true, width: 240 },
     recentFiles: [],
     recentFolders: [],
   };
@@ -55,6 +65,7 @@ export function defaultSettings(): Settings {
   return {
     schemaVersion: SCHEMA_VERSION,
     theme: 'system',
+    openFiles: 'tabs',
     zoom: 100,
     wordWrap: true,
     allowRemoteImages: true,
@@ -100,11 +111,18 @@ export function parseSession(json: string | null | undefined): SessionData {
   }
   d.activeIndex = Math.round(clampNum(v.activeIndex, 0, Math.max(0, d.tabs.length - 1), 0));
   d.workspace = isStr(v.workspace) ? v.workspace : null;
+  // v1.2까지의 sidePanel.tab(목차·작업 공간 중 보이던 탭)은 두 패널로 나뉘면서 쓰지 않는다.
   if (v.sidePanel && typeof v.sidePanel === 'object') {
     d.sidePanel = {
       visible: typeof v.sidePanel.visible === 'boolean' ? v.sidePanel.visible : true,
-      tab: v.sidePanel.tab === 'workspace' ? 'workspace' : 'toc',
-      width: Math.round(clampNum(v.sidePanel.width, 160, 600, 240)),
+      width: Math.round(clampNum(v.sidePanel.width, PANEL_MIN, PANEL_MAX, 240)),
+      listHeight: Math.round(clampNum(v.sidePanel.listHeight, LIST_MIN, 2000, 200)),
+    };
+  }
+  if (v.tocPanel && typeof v.tocPanel === 'object') {
+    d.tocPanel = {
+      visible: typeof v.tocPanel.visible === 'boolean' ? v.tocPanel.visible : true,
+      width: Math.round(clampNum(v.tocPanel.width, PANEL_MIN, PANEL_MAX, 240)),
     };
   }
   d.recentFiles = strList(v.recentFiles, MAX_RECENT_FILES);
@@ -117,6 +135,7 @@ export function parseSettings(json: string | null | undefined): Settings {
   const v = parseJson(json);
   if (!v) return d;
   if (v.theme === 'light' || v.theme === 'dark' || v.theme === 'system') d.theme = v.theme;
+  if (v.openFiles === 'tabs' || v.openFiles === 'list') d.openFiles = v.openFiles;
   d.zoom = Math.round(clampNum(v.zoom, ZOOM_MIN, ZOOM_MAX, 100));
   if (typeof v.wordWrap === 'boolean') d.wordWrap = v.wordWrap;
   if (typeof v.allowRemoteImages === 'boolean') d.allowRemoteImages = v.allowRemoteImages;

@@ -11,6 +11,7 @@ import { chunkBlocks, PreviewView } from '../src/views/preview';
 import type { SourceView } from '../src/views/source';
 import { ScrollSync } from '../src/views/sync';
 import { MenuBar } from '../src/ui/menubar';
+import { TabBar } from '../src/ui/tabbar';
 
 void dom;
 
@@ -118,17 +119,22 @@ test('세션·설정: 잘못된 값은 기본값, 범위는 자른다 (ARCH-07)'
     schemaVersion: 1,
     tabs: [{ path: 'C:\\a.md', mode: 'split', line: 12.5 }, { path: '', mode: 'x' }, { path: 'C:\\b.md', mode: 'bogus', line: -3 }],
     activeIndex: 9,
-    sidePanel: { visible: false, tab: 'workspace', width: 9999 },
+    sidePanel: { visible: false, tab: 'workspace', width: 9999, listHeight: 10 },
+    tocPanel: { visible: false, width: 'wide' },
     recentFiles: ['C:\\a.md', 3, null],
     unknownField: true,
   }));
   assert.deepEqual(s.tabs, [{ path: 'C:\\a.md', mode: 'split', line: 12.5 }, { path: 'C:\\b.md', mode: 'preview', line: 0 }]);
   assert.equal(s.activeIndex, 1);
-  assert.deepEqual(s.sidePanel, { visible: false, tab: 'workspace', width: 600 });
+  assert.deepEqual(s.sidePanel, { visible: false, width: 600, listHeight: 60 }, 'v1.2의 sidePanel.tab은 버린다');
+  assert.deepEqual(s.tocPanel, { visible: false, width: 240 });
+  assert.deepEqual(parseSession('{}').tocPanel, { visible: true, width: 240 });
   assert.deepEqual(s.recentFiles, ['C:\\a.md']);
-  const st = parseSettings('{"zoom": 999, "theme": "neon", "wordWrap": false, "schemaVersion": 7}');
+  const st = parseSettings('{"zoom": 999, "theme": "neon", "wordWrap": false, "openFiles": "side", "schemaVersion": 7}');
   assert.equal(st.zoom, 300);
   assert.equal(st.theme, 'system');
+  assert.equal(st.openFiles, 'tabs');
+  assert.equal(parseSettings('{"openFiles": "list"}').openFiles, 'list');
   assert.equal(st.wordWrap, false);
   assert.deepEqual(pushRecent(['C:\\A.md', 'C:\\b.md'], 'c:\\a.md', 20), ['c:\\a.md', 'C:\\b.md']);
 });
@@ -174,6 +180,34 @@ test('탭: 중복 열기 방지, 닫으면 이웃 탭, 닫은 탭 기록, 순서
   t.closeOthers(a.id);
   assert.deepEqual(t.tabs.map((x) => x.docId), ['a']);
   assert.equal(t.popClosed()?.path, 'C');
+});
+
+test('탭 바: 세로(열린 파일 목록)로 두면 위아래 위치로 끌어 놓을 자리를 정한다 (FR-FILE-05)', () => {
+  const t = new TabManager();
+  for (const n of ['a', 'b', 'c']) t.open(n, `C:\\${n}.md`);
+  const el = document.createElement('div');
+  document.body.append(el);
+  const bar = new TabBar(el, t, () => undefined);
+  bar.setVertical(true);
+  bar.render();
+  assert.ok(el.classList.contains('vertical'));
+  assert.equal(el.getAttribute('aria-orientation'), 'vertical');
+  // 한 줄 20px로 세로로 늘어선 목록. 가로로 판정하면 x=500은 맨 끝이다.
+  Array.from(el.querySelectorAll<HTMLElement>('.tab')).forEach((n, i) => {
+    n.getBoundingClientRect = () => ({ left: 0, width: 200, top: i * 20, height: 20 }) as DOMRect;
+  });
+  const drop = (id: number, x: number, y: number) => {
+    const e = new dom.window.Event('drop', { bubbles: true, cancelable: true });
+    Object.defineProperties(e, { dataTransfer: { value: { getData: () => String(id) } }, clientX: { value: x }, clientY: { value: y } });
+    el.dispatchEvent(e);
+  };
+  drop(t.tabs[2].id, 500, 5);
+  assert.deepEqual(t.tabs.map((x) => x.docId), ['c', 'a', 'b']);
+  bar.setVertical(false);
+  assert.equal(el.getAttribute('aria-orientation'), 'horizontal');
+  drop(t.tabs[0].id, 500, 5);
+  assert.deepEqual(t.tabs.map((x) => x.docId), ['a', 'b', 'c']);
+  el.remove();
 });
 
 test('문서 모델: 다시 읽으면 버전 증가, 수동 인코딩 유지, 개수 계산 (ARCH-01)', () => {

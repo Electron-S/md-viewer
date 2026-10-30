@@ -1,17 +1,17 @@
 # MD Viewer
 
-설치 없이 쓰는 Markdown 뷰어입니다. HTML 파일 하나(`viewer.html`)를 브라우저로 열어 쓰거나, Windows 앱(`MDViewer.exe`)으로 탐색기에서 문서를 바로 열거나, Claude Code에서 "이 문서 열어줘"라고 하면 스킬이 브라우저에 띄워 줍니다. 탭으로 여러 문서를 열고, 미리보기·원문·분할 보기를 오가며 읽고, 목차와 작업 공간 트리로 이동합니다. ```` ```mermaid ```` 블록은 다이어그램으로 그려 보여 줍니다.
+설치 없이 쓰는 Markdown 뷰어입니다. HTML 파일 하나(`viewer.html`)를 브라우저로 열어 쓰거나, Windows 앱(`MDViewer.exe`)으로 탐색기에서 문서를 바로 열거나, Claude Code에서 "이 문서 열어줘"라고 하면 스킬이 브라우저에 띄워 줍니다. 여러 문서를 위쪽 탭이나 왼쪽 목록으로 열어 두고, 미리보기·원문·분할 보기를 오가며 읽고, 오른쪽 목차와 왼쪽 작업 공간 트리로 이동합니다. ```` ```mermaid ```` 블록은 다이어그램으로 그려 보여 줍니다.
 
-- 버전: v1.2.0 ([릴리스 노트](RELEASE_NOTES.md))
+- 버전: v1.3.0 ([릴리스 노트](RELEASE_NOTES.md))
 - 뷰어: Edge·Chrome 최근 버전(모든 기능), Firefox·Safari 최신판(열기·렌더링·찾기·보기 모드)
 - Windows 앱: Windows 10/11 x64. WebView2 런타임과 .NET Framework 4.8이 필요하며 둘 다 Windows에 기본으로 들어 있습니다.
 - 실행기·스킬: Node.js 18 이상(Windows 10/11, WSL2, macOS, Linux)
-- 크기: `viewer.html` 약 2.8 MB, `MDViewer.exe` 약 3.8 MB, 스킬 묶음 zip 약 1.8 MB (Mermaid가 약 2 MB를 차지한다)
+- 크기: `viewer.html` 약 2.8 MB, `MDViewer.exe` 약 3.8 MB, 배포 zip 약 5.7 MB (Mermaid가 약 2 MB를 차지한다)
 - 요구사항: [SRS](https://claude.ai/code/artifact/de92e02f-5cc5-40f2-a3ca-80b6b2894cf1) · 설계: [SDD](https://claude.ai/code/artifact/80e2d190-46f7-4ac1-8d38-7a1954577b38) (비공개 문서. 요구사항 ID는 코드 주석과 테스트 이름에 그대로 쓴다)
 
 ## 쓰는 방법
 
-[릴리스](https://github.com/Electron-S/md-viewer/releases)에서 받거나 [빌드](#빌드)하면 `dist/`에 `viewer.html`, `MDViewer.exe`, `mdview/`(스킬 폴더), `mdview-<버전>.zip`이 만들어집니다.
+[릴리스](https://github.com/Electron-S/md-viewer/releases)에서 받거나 [빌드](#빌드)하면 `dist/`에 `viewer.html`, `MDViewer.exe`, `mdview/`(스킬 폴더)와 이 셋을 모두 담은 `md-viewer-<버전>.zip`이 만들어집니다.
 
 ### 1. HTML 파일만 쓰기 (독립 모드)
 
@@ -39,7 +39,7 @@
 
 ### 3. Claude Code에서 열기 (실행기 모드)
 
-스킬 묶음(`dist/mdview-<버전>.zip`)을 풀고 한 번 설치합니다.
+배포 zip(`md-viewer-<버전>.zip`)을 풀고, 푼 폴더에서 한 번 설치합니다.
 
 ```bash
 node mdview/mdview.mjs --install-skill
@@ -70,6 +70,11 @@ mdview --status | --stop
 - 구문이 틀린 다이어그램은 오류 한 줄과 원문을 보여 줍니다.
 - 보안 수준은 Mermaid의 `strict`로 고정합니다(`%%{init}%%`로 바꿀 수 없음). 다이어그램 안의 링크(`click … href`)·콜백·이미지는 따르거나 불러오지 않습니다.
 
+### 화면 배치
+
+- 목차는 문서 오른쪽 패널에, 작업 공간 트리는 왼쪽 패널에 있습니다. 왼쪽 패널은 Ctrl+B, 목차 패널은 Ctrl+Alt+B로 숨기거나 보입니다. 패널 경계선을 끌어 너비를 바꿉니다.
+- 열린 파일은 위쪽 탭 줄이나 왼쪽 목록으로 보입니다. **보기 → 열린 파일 표시**에서 고릅니다. "왼쪽 목록"을 고르면 Notepad++의 문서 목록처럼 왼쪽 패널 위 칸에 한 줄에 하나씩 늘어서고, 아래 칸에는 작업 공간이 남습니다. 두 칸 사이 경계선을 끌어 높이를 바꿉니다.
+
 단축키 목록은 뷰어에서 F1. 브라우저가 가로채는 키(Ctrl+W, Ctrl+Tab 등)를 피해 탭 닫기는 Alt+W, 닫은 탭 다시 열기는 Alt+Shift+T, 다음·이전 탭은 Alt+PageDown/PageUp입니다.
 
 ## 구조
@@ -92,7 +97,7 @@ UI 문자열은 `web/src/strings.ts`, `launcher/strings.ts`, `host/Strings.cs` �
 
 ```bash
 npm ci
-node tools/build.mjs   # 타입 검사 → dist/viewer.html, dist/mdview/, dist/mdview-<버전>.zip, dist/MDViewer.exe, dist/THIRD-PARTY-NOTICES.txt, 크기 검사
+node tools/build.mjs   # 타입 검사 → dist/viewer.html, dist/mdview/, dist/MDViewer.exe, dist/THIRD-PARTY-NOTICES.txt, 크기 검사, dist/md-viewer-<버전>.zip
 node tools/test.mjs    # 단위 테스트 119개(화면 76, 실행기 43. CommonMark 스펙 652개·GFM 확장 24개, XSS, 다이어그램 정제, 문자열 분리 등)
                        # + Windows 앱 단위 테스트 11개(확인 50개, Windows·WSL에서만)
 ./tools/e2e.sh         # E2E (WSL + Windows Edge + MDViewer.exe. 준비는 tools/e2e.sh 머리말 참고)

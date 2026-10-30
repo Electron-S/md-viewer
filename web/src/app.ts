@@ -6,8 +6,8 @@ import { createMarkdown, DIAGRAM_CLASS, renderMarkdown, scanHeadings, type Headi
 import { basename, dirname, docKey } from './render/paths';
 import { createSanitizer, isViewablePath } from './render/sanitize';
 import {
-  Debouncer, MAX_RECENT_FILES, MAX_RECENT_FOLDERS, parseSession, parseSettings, pushRecent, SCHEMA_VERSION,
-  defaultSession, defaultSettings, ZOOM_MAX, ZOOM_MIN, type SessionData, type Settings, type Theme,
+  Debouncer, LIST_MIN, MAX_RECENT_FILES, MAX_RECENT_FOLDERS, PANEL_MAX, PANEL_MIN, parseSession, parseSettings, pushRecent, SCHEMA_VERSION,
+  defaultSession, defaultSettings, ZOOM_MAX, ZOOM_MIN, type OpenFilesView, type SessionData, type Settings, type Theme,
 } from './session';
 import { TabManager, type Tab, type ViewMode } from './tabs';
 import { TocPanel } from './panels/toc';
@@ -109,6 +109,7 @@ export class App {
   private viewsEl = $('views');
   private emptyEl = $('empty');
   private sideEl = $('side');
+  private tocEl = $('toc-side');
 
   // ------------------------------------------------------------------ 시작
 
@@ -139,6 +140,8 @@ export class App {
     this.applyTheme();
     this.applyZoom();
     this.applySidePanel();
+    this.applyTocPanel();
+    this.applyOpenFiles();
     this.claimSession();
     this.applyRememberHandles();
     if (this.session.workspace) this.workspace.setRoot(this.session.workspace);
@@ -242,7 +245,7 @@ export class App {
     window.close();
     // 스크립트로 닫을 수 없는 탭이면 물러났다는 안내만 남긴다. 메뉴·탭 줄도 감춰 이 탭에서 문서를 더 열지 않게 한다.
     for (const t of [...this.tabs.tabs]) this.tabs.close(t.id);
-    for (const id of ['menubar', 'tabbar', 'side', 'resizer', 'statusbar']) $(id).hidden = true;
+    for (const id of ['menubar', 'tabbar', 'side', 'resizer', 'toc-side', 'toc-resizer', 'statusbar']) $(id).hidden = true;
     this.viewsEl.hidden = true;
     this.emptyEl.hidden = false;
     this.emptyEl.replaceChildren(Object.assign(document.createElement('p'), { className: 'retired', textContent: S.retired.text }));
@@ -250,8 +253,8 @@ export class App {
   }
 
   private buildLayout() {
-    const sideContent = $('side-content');
-    sideContent.append(this.toc.el, this.workspace.el);
+    $('toc-body').append(this.toc.el);
+    $('ws-body').append(this.workspace.el);
     $('find-slot').append(this.findbar.el);
     this.viewsEl.querySelector('.pane.preview')!.append(this.preview.el);
 
@@ -283,10 +286,7 @@ export class App {
       },
     );
 
-    for (const b of Array.from(document.querySelectorAll<HTMLButtonElement>('.side-tab'))) {
-      b.addEventListener('click', () => this.showSideTab(b.dataset.tab === 'workspace' ? 'workspace' : 'toc'));
-    }
-    this.bindResizer();
+    this.bindResizers();
     $('empty-open').addEventListener('click', () => this.cmds.run('file.open'));
     $('empty-folder').addEventListener('click', () => this.cmds.run('file.openFolder'));
     $('empty-restore').addEventListener('click', () => this.cmds.run('file.restoreSession'));
@@ -488,7 +488,7 @@ export class App {
     this.session.workspace = path;
     this.workspace.setRoot(path);
     if (path) this.session.recentFolders = pushRecent(this.session.recentFolders, path, MAX_RECENT_FOLDERS);
-    if (show && path) this.showSideTab('workspace');
+    if (show && path) this.showSidePanel();
     this.saveSession.trigger();
   }
 
@@ -847,56 +847,71 @@ export class App {
     this.saveSettings.trigger();
   }
 
+  /** 왼쪽 패널: 열린 파일 목록(설정이 목록일 때)과 작업 공간 */
   private applySidePanel() {
     const sp = this.session.sidePanel;
     this.sideEl.hidden = !sp.visible;
     $('resizer').hidden = !sp.visible;
     this.sideEl.style.width = `${sp.width}px`;
-    this.selectSideTab(sp.tab);
+    $('open-files').style.height = `${sp.listHeight}px`;
   }
 
-  /** 패널 탭을 고르고, 숨겨져 있으면 연다. */
-  private showSideTab(tab: 'toc' | 'workspace', save = true) {
-    if (!this.session.sidePanel.visible) {
-      this.session.sidePanel.visible = true;
-      this.sideEl.hidden = false;
-      $('resizer').hidden = false;
-    }
-    this.selectSideTab(tab);
-    if (save) this.saveSession.trigger();
+  /** 오른쪽 패널: 목차 */
+  private applyTocPanel() {
+    const tp = this.session.tocPanel;
+    this.tocEl.hidden = !tp.visible;
+    $('toc-resizer').hidden = !tp.visible;
+    this.tocEl.style.width = `${tp.width}px`;
   }
 
-  private selectSideTab(tab: 'toc' | 'workspace') {
-    this.session.sidePanel.tab = tab;
-    this.toc.el.hidden = tab !== 'toc';
-    this.workspace.el.hidden = tab !== 'workspace';
-    for (const b of Array.from(document.querySelectorAll<HTMLElement>('.side-tab'))) {
-      const on = b.dataset.tab === tab;
-      b.classList.toggle('active', on);
-      b.setAttribute('aria-selected', String(on));
-    }
+  /** 왼쪽 패널이 숨겨져 있으면 연다. */
+  private showSidePanel() {
+    if (this.session.sidePanel.visible) return;
+    this.session.sidePanel.visible = true;
+    this.applySidePanel();
+    this.saveSession.trigger();
   }
 
-  private bindResizer() {
-    const resizer = $('resizer');
-    resizer.addEventListener('pointerdown', (e) => {
-      e.preventDefault();
-      resizer.setPointerCapture(e.pointerId);
-      const startX = e.clientX;
-      const startW = this.sideEl.getBoundingClientRect().width;
-      const move = (ev: PointerEvent) => {
-        const w = Math.round(Math.min(600, Math.max(160, startW + ev.clientX - startX)));
-        this.sideEl.style.width = `${w}px`;
-        this.session.sidePanel.width = w;
-      };
-      const up = () => {
-        resizer.removeEventListener('pointermove', move);
-        resizer.removeEventListener('pointerup', up);
-        this.saveSession.trigger();
-      };
-      resizer.addEventListener('pointermove', move);
-      resizer.addEventListener('pointerup', up);
-    });
+  /** 열린 파일을 위쪽 탭 줄로 보일지 왼쪽 패널 위 칸의 목록으로 보일지 맞춘다. 탭 줄 요소 하나를 옮겨 쓴다. */
+  private applyOpenFiles() {
+    const list = this.settings.openFiles === 'list';
+    const bar = $('tabbar');
+    if (list) $('open-files').append(bar);
+    else $('app').insertBefore(bar, $('body'));
+    $('open-files').hidden = !list;
+    $('side-split').hidden = !list;
+    this.tabbar.setVertical(list);
+    // 옮기면 스크롤 위치가 처음으로 돌아가므로 활성 탭이 보이게 다시 그린다.
+    this.tabbar.render();
+  }
+
+  private setOpenFiles(v: OpenFilesView) {
+    if (this.settings.openFiles === v) return;
+    this.settings.openFiles = v;
+    this.applyOpenFiles();
+    // 목록은 왼쪽 패널에 있으므로 숨겨져 있으면 연다.
+    if (v === 'list') this.showSidePanel();
+    this.saveSettings.trigger();
+  }
+
+  private bindResizers() {
+    const width = (w: number) => Math.round(Math.min(PANEL_MAX, Math.max(PANEL_MIN, w)));
+    const save = () => this.saveSession.trigger();
+    dragSize($('resizer'), 'x', 1, () => this.sideEl.getBoundingClientRect().width, (w) => {
+      this.session.sidePanel.width = width(w);
+      this.sideEl.style.width = `${this.session.sidePanel.width}px`;
+    }, save);
+    // 목차 패널은 오른쪽에 있으므로 경계선을 왼쪽으로 끌수록 넓어진다.
+    dragSize($('toc-resizer'), 'x', -1, () => this.tocEl.getBoundingClientRect().width, (w) => {
+      this.session.tocPanel.width = width(w);
+      this.tocEl.style.width = `${this.session.tocPanel.width}px`;
+    }, save);
+    const list = $('open-files');
+    dragSize($('side-split'), 'y', 1, () => list.getBoundingClientRect().height, (h) => {
+      list.style.height = `${Math.round(Math.max(LIST_MIN, h))}px`;
+      // 아래 작업 공간을 남기는 상한은 CSS(max-height)가 정하므로 실제로 그려진 높이를 기억한다.
+      this.session.sidePanel.listHeight = Math.round(list.getBoundingClientRect().height);
+    }, save);
   }
 
   private renderRecentList() {
@@ -1109,12 +1124,16 @@ export class App {
         this.saveSession.trigger();
       },
     });
-    c.register({ id: 'view.toc', title: S.cmd.viewToc, checked: () => this.session.sidePanel.visible && this.session.sidePanel.tab === 'toc', run: () => this.showSideTab('toc') });
     c.register({
-      id: 'view.workspace', title: S.cmd.viewWorkspace,
-      checked: () => this.session.sidePanel.visible && this.session.sidePanel.tab === 'workspace',
-      run: () => this.showSideTab('workspace'),
+      id: 'view.toc', title: S.cmd.viewToc, keys: ['Ctrl+Alt+B'], checked: () => this.session.tocPanel.visible,
+      run: () => {
+        this.session.tocPanel.visible = !this.session.tocPanel.visible;
+        this.applyTocPanel();
+        this.saveSession.trigger();
+      },
     });
+    c.register({ id: 'view.openFiles.tabs', title: S.cmd.openFilesTabs, checked: () => this.settings.openFiles === 'tabs', run: () => this.setOpenFiles('tabs') });
+    c.register({ id: 'view.openFiles.list', title: S.cmd.openFilesList, checked: () => this.settings.openFiles === 'list', run: () => this.setOpenFiles('list') });
     c.register({ id: 'view.theme.light', title: S.cmd.themeLight, checked: () => this.settings.theme === 'light', run: () => this.setTheme('light') });
     c.register({ id: 'view.theme.dark', title: S.cmd.themeDark, checked: () => this.settings.theme === 'dark', run: () => this.setTheme('dark') });
     c.register({ id: 'view.theme.system', title: S.cmd.themeSystem, checked: () => this.settings.theme === 'system', run: () => this.setTheme('system') });
@@ -1199,14 +1218,15 @@ export class App {
           { cmd: 'view.preview' }, { cmd: 'view.source' }, { cmd: 'view.split' },
           { sep: true }, { cmd: 'view.wordWrap' },
           { sep: true }, { cmd: 'view.zoomIn' }, { cmd: 'view.zoomOut' }, { cmd: 'view.zoomReset' },
-          { sep: true }, { cmd: 'view.sidePanel' },
+          { sep: true }, { cmd: 'view.sidePanel' }, { cmd: 'view.toc' },
+          { label: S.menu.openFiles, sub: () => [{ cmd: 'view.openFiles.tabs' }, { cmd: 'view.openFiles.list' }] },
           { sep: true }, { label: S.menu.theme, sub: () => [{ cmd: 'view.theme.light' }, { cmd: 'view.theme.dark' }, { cmd: 'view.theme.system' }] },
         ],
       },
       { label: S.menu.find, key: 'S', items: () => [{ cmd: 'find.open' }, { cmd: 'find.next' }, { cmd: 'find.prev' }] },
       {
         label: S.menu.go, key: 'G',
-        items: () => [{ cmd: 'tab.next' }, { cmd: 'tab.prev' }, { sep: true }, { cmd: 'view.toc' }, { cmd: 'view.workspace' }],
+        items: () => [{ cmd: 'tab.next' }, { cmd: 'tab.prev' }],
       },
       {
         label: S.menu.encoding, key: 'N',
@@ -1271,6 +1291,25 @@ function loadSourceBundle(): Promise<typeof SourceView> {
   const w = window as any;
   if (!w.__mdvSourceView && typeof w.__mdvLoadSource === 'function') w.__mdvLoadSource();
   return w.__mdvSourceView ? Promise.resolve(w.__mdvSourceView) : Promise.reject(new Error(S.error.sourceModuleMissing));
+}
+
+/** 경계선을 끌어 패널 크기를 바꾼다. dir은 끄는 방향과 크기가 느는 방향이 같으면 1, 반대면 -1이다. */
+function dragSize(handle: HTMLElement, axis: 'x' | 'y', dir: 1 | -1, start: () => number, set: (size: number) => void, done: () => void) {
+  const pos = (e: PointerEvent) => (axis === 'x' ? e.clientX : e.clientY);
+  handle.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    handle.setPointerCapture(e.pointerId);
+    const from = pos(e);
+    const size = start();
+    const move = (ev: PointerEvent) => set(size + dir * (pos(ev) - from));
+    const up = () => {
+      handle.removeEventListener('pointermove', move);
+      handle.removeEventListener('pointerup', up);
+      done();
+    };
+    handle.addEventListener('pointermove', move);
+    handle.addEventListener('pointerup', up);
+  });
 }
 
 function nextPaint(): Promise<void> {

@@ -15,13 +15,17 @@
     <div id="tabbar"></div>
     <div id="body">
       <aside id="side">
-        <div class="side-tabs" role="tablist">
-          <button class="side-tab active" data-tab="toc" role="tab" data-s="tocTab"></button>
-          <button class="side-tab" data-tab="workspace" role="tab" data-s="workspaceTab"></button>
-        </div>
-        <div id="side-content"></div>
+        <!-- 열린 파일을 목록으로 보일 때는 탭 줄(#tabbar)을 이 칸으로 옮긴다. -->
+        <section id="open-files" class="side-section" hidden>
+          <div class="side-head" data-s="openFilesTitle"></div>
+        </section>
+        <div id="side-split" role="separator" aria-orientation="horizontal" data-s-title="splitter" hidden></div>
+        <section id="ws-section" class="side-section grow">
+          <div class="side-head" data-s="workspaceTitle"></div>
+          <div id="ws-body" class="side-body"></div>
+        </section>
       </aside>
-      <div id="resizer" role="separator" aria-orientation="vertical" data-s-title="resizer"></div>
+      <div id="resizer" class="resizer" role="separator" aria-orientation="vertical" data-s-title="resizer"></div>
       <main id="main">
         <div id="find-slot"></div>
         <div id="views" data-mode="preview" hidden>
@@ -42,6 +46,11 @@
           </div>
         </div>
       </main>
+      <div id="toc-resizer" class="resizer" role="separator" aria-orientation="vertical" data-s-title="resizer"></div>
+      <aside id="toc-side">
+        <div class="side-head" data-s="tocTitle"></div>
+        <div id="toc-body" class="side-body"></div>
+      </aside>
     </div>
     <div id="statusbar"></div>
   </div>

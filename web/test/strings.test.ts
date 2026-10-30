@@ -97,5 +97,5 @@ test('index.html의 data-s 키는 모두 표에 있고 시작할 때 채워진�
   applyPageStrings(doc);
   for (const el of keyed) assert.ok(el.textContent, `data-s="${el.dataset.s}" 가 비었습니다`);
   for (const el of titled) assert.ok(el.title, `data-s-title="${el.dataset.sTitle}" 가 비었습니다`);
-  assert.equal(doc.querySelector('.side-tab[data-tab="toc"]')!.textContent, S.page.tocTab);
+  assert.equal(doc.querySelector('#toc-side .side-head')!.textContent, S.page.tocTitle);
 });
