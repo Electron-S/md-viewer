@@ -16,6 +16,20 @@ export function isTextPath(p: string): boolean {
   return TEXT_EXT.test(p);
 }
 
+/** 쓸 수 있는 문서인지: 뷰어가 여는 Markdown·텍스트 확장자 (NFR-SEC-05) */
+export function isDocumentPath(p: string): boolean {
+  return MARKDOWN_EXT.test(p) || TEXT_EXT.test(p);
+}
+
+/** 새 문서의 위치: mdv:/n<k>/<이름>. 파일이 없어 다시 열 수 없다 (FR-EDIT-06, SDD 5.2). */
+export function untitledPath(k: number, name: string): string {
+  return `mdv:/n${k}/${name}`;
+}
+
+export function isUntitledPath(p: string): boolean {
+  return /^mdv:\/n\d+\//i.test(p);
+}
+
 const WIN_ABS = /^[a-zA-Z]:[\\/]|^[\\/]{2}[^\\/]/;
 
 export function pathStyle(p: string): PathStyle | null {

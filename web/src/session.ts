@@ -40,6 +40,8 @@ export interface Settings {
   rememberHandles: boolean;
   /** v1.1 단축키 사용자 지정용 예약 */
   keybindings: Record<string, string>;
+  /** 입력이 멈추면 저장한다 (FR-EDIT-10, 기본 끔) */
+  autoSave: boolean;
 }
 
 export const ZOOM_MIN = 50;
@@ -72,6 +74,7 @@ export function defaultSettings(): Settings {
     largeFileMB: 5,
     rememberHandles: true,
     keybindings: {},
+    autoSave: false,
   };
 }
 
@@ -140,6 +143,7 @@ export function parseSettings(json: string | null | undefined): Settings {
   if (typeof v.wordWrap === 'boolean') d.wordWrap = v.wordWrap;
   if (typeof v.allowRemoteImages === 'boolean') d.allowRemoteImages = v.allowRemoteImages;
   if (typeof v.rememberHandles === 'boolean') d.rememberHandles = v.rememberHandles;
+  if (typeof v.autoSave === 'boolean') d.autoSave = v.autoSave;
   d.largeFileMB = clampNum(v.largeFileMB, 1, 100, 5);
   if (v.keybindings && typeof v.keybindings === 'object') {
     for (const [k, val] of Object.entries(v.keybindings)) if (isStr(val)) d.keybindings[k] = val;

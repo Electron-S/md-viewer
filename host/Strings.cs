@@ -15,6 +15,8 @@ namespace MdViewer
         public const string OpenDialogTitle = "열기";
         public const string OpenDialogFilter = "Markdown 문서 (*.md;*.markdown;*.mdown;*.mkd)|*.md;*.markdown;*.mdown;*.mkd;*.mkdn;*.mdwn;*.mdtxt;*.mdtext|텍스트 파일 (*.txt)|*.txt|모든 파일 (*.*)|*.*";
         public const string OpenFolderTitle = "폴더 열기";
+        public const string SaveDialogTitle = "다른 이름으로 저장";
+        public const string SaveDialogFilter = "Markdown 문서 (*.md)|*.md|텍스트 파일 (*.txt)|*.txt|모든 문서 (*.md;*.markdown;*.txt)|*.md;*.markdown;*.mdown;*.mkd;*.mkdn;*.mdwn;*.mdtxt;*.mdtext;*.txt";
 
         // ---- 탐색기 연결 프로그램 등록
         public const string DocTypeName = "Markdown 문서";
@@ -35,6 +37,12 @@ namespace MdViewer
         public static string UnknownMethod(string method) { return "알 수 없는 메서드: " + method; }
         public const string UrlNotAllowed = "열 수 없는 주소입니다";
         public const string NoApi = "없는 주소입니다";
+        public const string NotDocument = "문서 파일(Markdown·텍스트)에만 쓸 수 있습니다";
+        public const string WriteNotAllowed = "이 창에서 열거나 저장 대화상자로 고른 파일에만 쓸 수 있습니다";
+        public const string FileExists = "같은 이름의 파일이 이미 있습니다";
+        public const string ChangedOnDisk = "파일을 읽은 뒤 다른 프로그램이 바꿨습니다";
+        public const string BadRequest = "잘못된 요청입니다";
+        public const string Forbidden = "접근이 거부되었습니다";
 
         // ---- 로그
         public static string LogUiException(object ex) { return "UI 예외: " + ex; }

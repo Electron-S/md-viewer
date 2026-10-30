@@ -39,6 +39,9 @@ namespace MdViewer
         bool frontendReady;
         bool quitConfirmed;
         bool closingRequested;
+        /// <summary>화면에 저장하지 않은 문서가 있는지 (app.setDirty, FR-EDIT-08)</summary>
+        bool dirty;
+        Timer closeTimer;
         Rectangle normalBounds;
         CoreWebView2Environment env;
         /// <summary>창을 띄우기 전에 시작해 둔 WebView2 환경 생성 (NFR-PERF-01)</summary>
@@ -173,6 +176,11 @@ namespace MdViewer
                 });
                 return;
             }
+            if (route == "api/write")
+            {
+                ServeWrite(e, query);
+                return;
+            }
             if (route == "api/file")
             {
                 string path = QueryValue(query, "path");
@@ -191,6 +199,51 @@ namespace MdViewer
                 return;
             }
             e.Response = ErrorResponse("ENOENT", Strings.NoApi);
+        }
+
+        /// <summary>
+        /// 문서 쓰기 (FR-EDIT-04, SDD 6.4). 실행기의 POST /api/write와 같은 모양이다. 화면 출처의 POST·octet-stream만 받고,
+        /// 본문은 UI 스레드에서 메모리로 옮긴 뒤 쓰기는 뒤에서 한다.
+        /// </summary>
+        void ServeWrite(CoreWebView2WebResourceRequestedEventArgs e, string query)
+        {
+            var req = e.Request;
+            string origin = req.Headers.Contains("Origin") ? req.Headers.GetHeader("Origin") : "";
+            string type = req.Headers.Contains("Content-Type") ? req.Headers.GetHeader("Content-Type") : "";
+            if (req.Method != "POST" || origin.TrimEnd('/') != Bridge.Origin.TrimEnd('/'))
+            {
+                e.Response = ErrorResponse("EFORBIDDEN", Strings.Forbidden);
+                return;
+            }
+            if (!type.StartsWith("application/octet-stream", StringComparison.OrdinalIgnoreCase) || req.Content == null)
+            {
+                e.Response = ErrorResponse("EINVAL", Strings.BadRequest);
+                return;
+            }
+            byte[] body;
+            using (var ms = new MemoryStream())
+            {
+                req.Content.CopyTo(ms);
+                body = ms.ToArray();
+            }
+            string path = QueryValue(query, "path");
+            double? baseMtime = QueryNumber(query, "baseMtime");
+            double? baseSize = QueryNumber(query, "baseSize");
+            bool create = QueryValue(query, "create") == "1";
+            bool overwrite = QueryValue(query, "overwrite") == "1";
+            Respond(e, () =>
+            {
+                var r = FileService.WriteBytes(path, body, baseMtime, baseSize.HasValue ? (long?)(long)baseSize.Value : null, create, overwrite);
+                return new ApiResult(Storage.Utf8.GetBytes(new JavaScriptSerializer().Serialize(r)), "Content-Type: application/json; charset=utf-8\r\nCache-Control: no-store");
+            });
+        }
+
+        static double? QueryNumber(string query, string name)
+        {
+            string v = QueryValue(query, name);
+            double n;
+            if (string.IsNullOrEmpty(v) || !double.TryParse(v, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out n)) return null;
+            return n;
         }
 
         sealed class ApiResult
@@ -256,8 +309,11 @@ namespace MdViewer
             {
                 case "EINVAL": status = 400; break;
                 case "EACCES": status = 403; break;
+                case "EFORBIDDEN": status = 403; break;
                 case "ENOENT": status = 404; break;
                 case "EISDIR": status = 409; break;
+                case "ECONFLICT": status = 409; break;
+                case "EEXIST": status = 409; break;
                 case "ETOOBIG": status = 413; break;
                 default: status = 500; break;
             }
@@ -421,6 +477,48 @@ namespace MdViewer
             return FolderPicker.Show(Handle, Strings.OpenFolderTitle);
         }
 
+        /// <summary>다른 이름으로 저장할 위치 (FR-EDIT-05). 고른 경로는 쓰기 허용 집합에 넣는다. 덮어쓸지는 대화상자가 묻는다.</summary>
+        public string PickSave(string suggestedName, string dir)
+        {
+            using (var dlg = new SaveFileDialog())
+            {
+                dlg.Title = Strings.SaveDialogTitle;
+                dlg.Filter = Strings.SaveDialogFilter;
+                dlg.FilterIndex = FileService.IsText(suggestedName ?? "") ? 2 : 1;
+                dlg.OverwritePrompt = true;
+                dlg.AddExtension = true;
+                dlg.DefaultExt = "md";
+                if (!string.IsNullOrEmpty(suggestedName)) dlg.FileName = Path.GetFileName(suggestedName);
+                try
+                {
+                    if (!string.IsNullOrEmpty(dir) && Directory.Exists(dir)) dlg.InitialDirectory = dir;
+                }
+                catch (Exception) { }
+                if (dlg.ShowDialog(this) != DialogResult.OK) return null;
+                string path = FileService.Normalize(dlg.FileName);
+                if (!FileService.IsDocument(path)) throw new BridgeException("EACCES", Strings.NotDocument);
+                FileService.AllowWrite(path);
+                return path;
+            }
+        }
+
+        /// <summary>화면에 저장하지 않은 문서가 있는지 (FR-EDIT-08). 있는 동안에는 닫기를 강제로 끝내지 않는다.</summary>
+        public void SetDirty(bool on)
+        {
+            dirty = on;
+        }
+
+        /// <summary>화면이 닫기를 취소했다(저장 확인에서 취소). 다음 닫기를 다시 받는다.</summary>
+        public void CancelClose()
+        {
+            closingRequested = false;
+            if (closeTimer != null)
+            {
+                closeTimer.Dispose();
+                closeTimer = null;
+            }
+        }
+
         /// <summary>제목 표시줄을 테마에 맞춘다 (Windows 10 20H1+는 20, 그 이전은 19).</summary>
         public void SetDark(bool dark)
         {
@@ -444,25 +542,29 @@ namespace MdViewer
         {
             // Windows 종료 때만 기다리지 않는다. 작업 관리자의 "작업 끝내기"·taskkill(/f 없이)처럼 다른 프로세스가 보낸 WM_CLOSE는
             // TaskManagerClosing으로 오는데, 그때도 1초 안에서 저장할 기회를 준다.
+            // 저장하지 않은 문서가 있으면 Windows 종료도 일반 닫기처럼 화면에 묻는다 (FR-EDIT-08). Windows는 종료를 막는 앱으로 보여 준다.
             bool shutdown = e.CloseReason == CloseReason.WindowsShutDown;
-            if (quitConfirmed || shutdown || web.CoreWebView2 == null || !frontendReady)
+            if (quitConfirmed || (shutdown && !dirty) || web.CoreWebView2 == null || !frontendReady)
             {
                 SaveWindow();
                 Watch.Dispose();
                 return;
             }
-            // 화면이 세션을 저장할 시간을 준다 (SDD 7.3). 1초 안에 응답이 없으면 그냥 닫는다.
             e.Cancel = true;
             if (closingRequested) return;
             closingRequested = true;
             bridge.Emit("app.closing", null);
-            var timer = new Timer { Interval = 1000 };
-            timer.Tick += (s, a) =>
+            // 고친 문서가 있으면 화면이 저장할지 묻고 app.quit·app.cancelClose로 답한다. 기다린다.
+            if (dirty) return;
+            // 화면이 세션을 저장할 시간을 준다 (SDD 7.3). 1초 안에 응답이 없으면 그냥 닫는다.
+            closeTimer = new Timer { Interval = 1000 };
+            closeTimer.Tick += (s, a) =>
             {
-                timer.Dispose();
+                if (closeTimer != null) closeTimer.Dispose();
+                closeTimer = null;
                 QuitConfirmed();
             };
-            timer.Start();
+            closeTimer.Start();
         }
 
         void TrackBounds()

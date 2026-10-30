@@ -4,7 +4,7 @@
 import { isEncoding } from '../encoding';
 import { normalizePath } from '../render/paths';
 import { S } from '../strings';
-import { filterEntries, hostError, toHostDoc } from './listing';
+import { filterEntries, hostError, toHostDoc, writeQuery } from './listing';
 import { Emitter, HostError, type Bridge, type BridgeEvent, type DirEntry, type PathEntry, type ReadyInfo } from './types';
 
 /** Windows 앱이 화면을 띄우는 주소의 호스트 이름 */
@@ -136,6 +136,23 @@ export class HostBridge implements Bridge {
       case 'dir.list': {
         const r = await this.post<{ entries?: DirEntry[] }>('dir.list', { path: String(p.path ?? '') });
         return { entries: filterEntries(r.entries ?? []) } as T;
+      }
+      case 'file.write': {
+        // 실행기와 같은 모양의 POST /api/write. 날 바이트라 메시지(JSON)보다 가볍고 10초 제한도 없다 (SDD 6.4).
+        const path = normalizePath(String(p.path ?? ''));
+        // 호스트는 encodeURIComponent 모양만 푼다('+'를 공백으로 읽지 않음). URLSearchParams는 공백을 '+'로 쓰므로 쓰지 않는다.
+        const q = Object.entries({ path, ...writeQuery(p) }).map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join('&');
+        let res: Response;
+        try {
+          res = await fetch(`/api/write?${q}`, { method: 'POST', cache: 'no-store', headers: { 'content-type': 'application/octet-stream' }, body: p.bytes as Uint8Array<ArrayBuffer> });
+        } catch {
+          throw new HostError('EHOST', S.error.host);
+        }
+        if (!res.ok) {
+          const e = (await res.json().catch(() => null)) as { code?: string; message?: string } | null;
+          throw hostError(e?.code ?? 'EHOST', e?.message);
+        }
+        return (await res.json()) as T;
       }
       // 파일 핸들(독립 모드)에만 있는 일이다.
       case 'handles.remember':

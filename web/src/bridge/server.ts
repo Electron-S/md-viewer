@@ -3,7 +3,7 @@
 import { isEncoding } from '../encoding';
 import { isInside, normalizePath } from '../render/paths';
 import { S } from '../strings';
-import { filterEntries, hostError, toHostDoc } from './listing';
+import { filterEntries, hostError, toHostDoc, writeQuery } from './listing';
 import type { LocalBridge } from './local';
 import { Emitter, HostError, type Bridge, type BridgeEvent, type DirEntry, type PathEntry, type ReadyInfo } from './types';
 
@@ -68,6 +68,26 @@ export class ServerBridge implements Bridge {
     return res;
   }
 
+  /** 문서 바이트를 실행기에 쓴다 (FR-EDIT-04). 본문은 날 바이트(octet-stream)다. */
+  private async callWrite(path: string, bytes: Uint8Array, query: Record<string, string>): Promise<Response> {
+    let res: Response;
+    try {
+      res = await fetch(this.url('/api/write', { path, ...query }), {
+        method: 'POST',
+        cache: 'no-store',
+        headers: { 'content-type': 'application/octet-stream' },
+        body: bytes as Uint8Array<ArrayBuffer>,
+      });
+    } catch {
+      throw new HostError('EOFFLINE', S.error.offline);
+    }
+    if (!res.ok) {
+      const e = (await res.json().catch(() => null)) as { code?: string; message?: string } | null;
+      throw hostError(e?.code ?? 'EHOST', e?.message);
+    }
+    return res;
+  }
+
   async request<T = any>(method: string, p: Record<string, any> = {}): Promise<T> {
     if (isLocal(p.path)) return this.local.request<T>(method, p);
     switch (method) {
@@ -87,6 +107,8 @@ export class ServerBridge implements Bridge {
         const entries = (await (await this.call('GET', '/api/list', { path: String(p.path) })).json()) as DirEntry[];
         return { entries: filterEntries(entries) } as T;
       }
+      case 'file.write':
+        return (await (await this.callWrite(String(p.path), p.bytes as Uint8Array, writeQuery(p))).json()) as T;
       case 'watch.set': {
         const paths: string[] = p.paths ?? [];
         void this.local.request('watch.set', { paths: paths.filter(isLocal) }).catch(() => {});

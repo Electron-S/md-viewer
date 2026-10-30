@@ -1,5 +1,5 @@
 // 브리지 계약 (SDD 6.1). 화면이 파일·OS 기능을 부르는 유일한 창구다.
-import type { Encoding, Eol } from '../encoding';
+import type { Encoding, Eol, EolCounts } from '../encoding';
 
 export class HostError extends Error {
   constructor(
@@ -20,13 +20,15 @@ export interface DirEntry {
   isDir: boolean;
 }
 
-/** file.read 결과: 문서 모델 필드(SDD 5.1)에서 id·version·state를 뺀 것 */
+/** file.read 결과: 문서 모델 필드(SDD 5.1)에서 id·version·state·편집 상태를 뺀 것 */
 export interface HostDoc {
   path: string;
+  /** 줄 끝을 LF로 맞춘 본문. 원래 줄 끝은 eol·eolCounts에 있다 (v2.0). */
   text: string;
   encoding: Encoding;
   hasBom: boolean;
   eol: Eol;
+  eolCounts: EolCounts;
   size: number;
   mtime: number;
   decodeWarning: boolean;

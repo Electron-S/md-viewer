@@ -85,6 +85,20 @@ export class TabManager {
     return tab;
   }
 
+  /** 다른 이름으로 저장한 뒤 탭이 새 위치의 문서를 가리키게 한다 (FR-EDIT-05). */
+  retarget(id: number, docId: string, path: string) {
+    const tab = this.get(id);
+    if (!tab) return;
+    tab.docId = docId;
+    tab.path = path;
+    this.emit('structure');
+  }
+
+  /** 닫은 탭 목록에서 뺀다(다시 열 수 없는 새 문서 등). */
+  forgetClosed(keep: (path: string) => boolean) {
+    this.closed = this.closed.filter((t) => keep(t.path));
+  }
+
   closeOthers(id: number): Tab[] {
     const closed = this.tabs.filter((t) => t.id !== id);
     for (const t of closed) this.close(t.id);

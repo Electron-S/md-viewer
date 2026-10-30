@@ -41,6 +41,39 @@ export function showDialog(title: string, body: Node | string, buttons: DialogBu
   });
 }
 
+/** 글 한 줄을 묻는다(실행기 모드의 저장 경로, FR-EDIT-05). Enter는 확인, Esc·취소는 undefined. */
+export function promptText(title: string, label: string, value: string, hint?: string): Promise<string | undefined> {
+  const box = document.createElement('div');
+  const lab = document.createElement('label');
+  lab.className = 'dialog-field';
+  lab.textContent = label;
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.value = value;
+  input.spellcheck = false;
+  lab.append(input);
+  box.append(lab);
+  if (hint) box.append(Object.assign(document.createElement('p'), { className: 'dialog-hint', textContent: hint }));
+  const done = showDialog(title, box, [
+    { label: S.dialog.ok, value: 'ok', primary: true },
+    { label: S.dialog.cancel, value: 'cancel' },
+  ]).then((v) => (v === 'ok' ? input.value : undefined));
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.isComposing) {
+      e.preventDefault();
+      (input.closest('dialog')?.querySelector('.dialog-buttons .primary') as HTMLElement | null)?.click();
+    }
+  });
+  // 이름 부분(확장자 앞)을 골라 둔다.
+  requestAnimationFrame(() => {
+    input.focus();
+    const dot = value.lastIndexOf('.');
+    const slash = Math.max(value.lastIndexOf('/'), value.lastIndexOf('\\'));
+    input.setSelectionRange(slash + 1, dot > slash ? dot : value.length);
+  });
+  return done;
+}
+
 let toastBox: HTMLElement | null = null;
 
 export function toast(message: string, kind: 'info' | 'error' = 'info', ms = 4000) {

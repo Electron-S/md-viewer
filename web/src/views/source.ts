@@ -1,9 +1,11 @@
-import { Compartment, EditorState } from '@codemirror/state';
-import { drawSelection, EditorView, highlightActiveLineGutter, highlightSpecialChars, keymap, lineNumbers } from '@codemirror/view';
-import { defaultKeymap } from '@codemirror/commands';
+import { Annotation, Compartment, EditorState, Prec, Transaction } from '@codemirror/state';
+import { drawSelection, EditorView, highlightActiveLine, highlightActiveLineGutter, highlightSpecialChars, keymap, lineNumbers } from '@codemirror/view';
+import { defaultKeymap, history, historyKeymap, indentWithTab, redo, undo } from '@codemirror/commands';
 import { defaultHighlightStyle, LanguageSupport, syntaxHighlighting } from '@codemirror/language';
-import { markdownLanguage } from '@codemirror/lang-markdown';
-import { closeSearchPanel, findNext, findPrevious, openSearchPanel, search, SearchQuery, setSearchQuery } from '@codemirror/search';
+import { markdownKeymap, markdownLanguage } from '@codemirror/lang-markdown';
+import {
+  closeSearchPanel, findNext, findPrevious, openSearchPanel, replaceAll, replaceNext, search, SearchQuery, setSearchQuery,
+} from '@codemirror/search';
 import { oneDark } from '@codemirror/theme-one-dark';
 import { S } from '../strings';
 import { MAX_MATCHES, type FindQuery, type FindStatus } from './find';
@@ -22,18 +24,26 @@ const SETTLE_MS = 1000;
 
 const lightTheme = [syntaxHighlighting(defaultHighlightStyle, { fallback: true }), EditorView.theme({}, { dark: false })];
 
+/** 디스크에서 다시 읽은 내용을 편집기에 넣는 변경. 사용자의 편집이 아니므로 수정됨을 켜지 않는다 (FR-EDIT-09). */
+const external = Annotation.define<boolean>();
+
 /**
- * 원문 보기. 실제 편집기 컴포넌트를 읽기 전용으로 쓴다 (ARCH-02).
- * 편집 단계에서는 readOnly compartment만 바꾸면 된다.
+ * 원문 보기 (ARCH-02). 실제 편집기 컴포넌트(CodeMirror)이고 v2.0부터 편집한다 (FR-EDIT-01).
+ * 편집기 하나를 모든 탭이 같이 쓰고, 문서마다 상태(본문·선택·실행 취소 기록)를 따로 두어 탭을 바꿀 때 갈아 끼운다.
  */
 export class SourceView {
   readonly el: HTMLElement;
   readonly view: EditorView;
   docId: string | null = null;
   docVersion = 0;
-  private readOnly = new Compartment();
+  /** 사용자가 본문을 고쳤다. 편집 조정자(edit.ts)가 받아 문서 모델에 반영한다. */
+  onChange: (docId: string) => void = () => {};
+  /** 보이지 않는 문서의 편집기 상태 */
+  private states = new Map<string, EditorState>();
+  private editable = new Compartment();
   private wrap = new Compartment();
   private theme = new Compartment();
+  private editableOn = true;
   private wrapOn = true;
   private dark = false;
   /** scrollToLine이 위치를 다시 맞추는 중인지. 이 동안의 스크롤은 사용자 스크롤로 치지 않는다. */
@@ -59,37 +69,157 @@ export class SourceView {
     this.settling = false;
   }
 
+  private editableExt(on: boolean) {
+    return [EditorState.readOnly.of(!on), EditorView.editable.of(on)];
+  }
+
   private makeState(text: string): EditorState {
     return EditorState.create({
       doc: text,
       extensions: [
         lineNumbers(),
         highlightActiveLineGutter(),
+        highlightActiveLine(),
         highlightSpecialChars(),
         drawSelection(),
+        history(),
         // markdown()은 HTML·JS·CSS 파서까지 끌고 오므로 Markdown 문법만 쓴다.
         new LanguageSupport(markdownLanguage),
         // 하이라이트는 패널이 열려 있을 때만 그려지므로 보이지 않는 패널을 쓴다.
         search({ createPanel: () => ({ dom: Object.assign(document.createElement('div'), { hidden: true }) }) }),
-        keymap.of(defaultKeymap),
-        this.readOnly.of(EditorState.readOnly.of(true)),
+        // 목록 기호 이어 쓰기(Enter)와 빈 기호 지우기(Backspace)가 기본 키보다 먼저다 (FR-EDIT-01).
+        Prec.high(keymap.of(markdownKeymap)),
+        keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]),
+        this.editable.of(this.editableExt(this.editableOn)),
         this.wrap.of(this.wrapOn ? EditorView.lineWrapping : []),
         this.theme.of(this.dark ? oneDark : lightTheme),
         baseTheme,
-        // 맞추는 시간 안에 줄 높이가 바뀌면(늦게 잰 줄 바꿈 등) 다시 맞춘다.
         EditorView.updateListener.of((u) => {
+          // 맞추는 시간 안에 줄 높이가 바뀌면(늦게 잰 줄 바꿈 등) 다시 맞춘다.
           if (this.target && (u.heightChanged || u.geometryChanged) && performance.now() < this.target.until) this.runSettle();
+          if (u.docChanged && this.docId && !u.transactions.some((tr) => tr.annotation(external))) this.onChange(this.docId);
         }),
       ],
     });
   }
 
-  setText(docId: string, version: number, text: string) {
+  /**
+   * 문서를 보인다. 처음 보는 문서면 상태를 만들고, 전에 본 문서면 그 상태(선택·실행 취소 기록)를 다시 쓴다.
+   * text는 문서 모델의 본문이다. 편집기 본문과 다르면(디스크에서 다시 읽음) 바뀐 부분만 넣는다 (FR-EDIT-09).
+   * editable이 거짓이면 읽기 전용이다(바이너리 문서).
+   */
+  show(docId: string, version: number, text: string, editable: boolean) {
+    if (this.docId === docId) {
+      if (this.docVersion !== version) {
+        this.docVersion = version;
+        this.reloadClean(text);
+      }
+      this.setEditable(editable);
+      return;
+    }
     this.cancelSettle();
+    if (this.docId) this.states.set(this.docId, this.view.state);
+    let state = this.states.get(docId);
+    this.states.delete(docId);
     this.docId = docId;
     this.docVersion = version;
-    this.view.setState(this.makeState(text));
+    this.editableOn = editable;
+    if (!state) {
+      this.view.setState(this.makeState(text));
+    } else {
+      this.view.setState(state);
+      // 보이지 않는 동안 바뀐 설정(줄 바꿈·테마·편집 가능)을 맞춘다.
+      this.view.dispatch({
+        effects: [
+          this.wrap.reconfigure(this.wrapOn ? EditorView.lineWrapping : []),
+          this.theme.reconfigure(this.dark ? oneDark : lightTheme),
+          this.editable.reconfigure(this.editableExt(editable)),
+        ],
+      });
+      this.reloadClean(text);
+    }
     if (this.query) this.applyQuery(this.query);
+  }
+
+  /** 디스크에서 다시 읽은 본문을 넣는다. 앞뒤 같은 부분은 두고 가운데만 바꿔 커서·스크롤을 지키고, 실행 취소 기록에는 넣지 않는다. */
+  private reloadClean(text: string) {
+    const doc = this.view.state.doc;
+    if (doc.length === text.length && doc.toString() === text) return;
+    const cur = doc.toString();
+    let start = 0;
+    const max = Math.min(cur.length, text.length);
+    while (start < max && cur.charCodeAt(start) === text.charCodeAt(start)) start++;
+    let endCur = cur.length;
+    let endNew = text.length;
+    while (endCur > start && endNew > start && cur.charCodeAt(endCur - 1) === text.charCodeAt(endNew - 1)) {
+      endCur--;
+      endNew--;
+    }
+    this.view.dispatch({
+      changes: { from: start, to: endCur, insert: text.slice(start, endNew) },
+      annotations: [external.of(true), Transaction.addToHistory.of(false)],
+    });
+  }
+
+  /** 문서의 편집 상태를 버린다(고친 내용을 버리고 다시 읽을 때, 탭을 닫을 때). 보이는 문서면 다음 show에서 새로 만든다. */
+  drop(docId: string) {
+    this.states.delete(docId);
+    if (this.docId === docId) {
+      this.docId = null;
+      this.docVersion = 0;
+    }
+  }
+
+  /** 열린 탭이 없는 문서의 상태를 버린다. */
+  prune(keep: Set<string>) {
+    for (const id of [...this.states.keys()]) if (!keep.has(id)) this.states.delete(id);
+    if (this.docId && !keep.has(this.docId)) this.drop(this.docId);
+  }
+
+  /** 다른 이름으로 저장해 문서 id가 바뀌었다 (FR-EDIT-05). */
+  rekey(oldId: string, newId: string, version: number) {
+    const st = this.states.get(oldId);
+    if (st) {
+      this.states.delete(oldId);
+      this.states.set(newId, st);
+    }
+    if (this.docId === oldId) {
+      this.docId = newId;
+      this.docVersion = version;
+    }
+  }
+
+  /** 편집 조정자가 편집기 본문을 문서 모델에 반영했다. 다시 넣을 필요가 없게 버전만 맞춘다. */
+  syncVersion(docId: string, version: number) {
+    if (this.docId === docId) this.docVersion = version;
+  }
+
+  /** 문서의 편집기 본문(LF). 편집기에 없는 문서면 null */
+  textOf(docId: string): string | null {
+    if (this.docId === docId) return this.view.state.doc.toString();
+    return this.states.get(docId)?.doc.toString() ?? null;
+  }
+
+  setEditable(on: boolean) {
+    if (this.editableOn === on) return;
+    this.editableOn = on;
+    this.view.dispatch({ effects: this.editable.reconfigure(this.editableExt(on)) });
+  }
+
+  get isEditable(): boolean {
+    return this.editableOn;
+  }
+
+  focus() {
+    this.view.focus();
+  }
+
+  undo(): boolean {
+    return undo(this.view);
+  }
+
+  redo(): boolean {
+    return redo(this.view);
   }
 
   setWrap(on: boolean) {
@@ -162,6 +292,47 @@ export class SourceView {
     return { count: this.count(query), index: -1 };
   }
 
+  /**
+   * 찾아 바꾸기 (FR-EDIT-07). 바꾸기는 지금 선택한 일치를 바꾸고 다음 일치를 고른다. 모두 바꾸기는 변경 하나라 실행 취소 한 번에 돌아온다.
+   * 정규식이면 $1·$&로 찾은 부분을 쓴다.
+   */
+  replace(q: FindQuery, replacement: string, all: boolean): FindStatus {
+    const query = new SearchQuery({ search: q.text, caseSensitive: q.caseSensitive, regexp: q.regex, wholeWord: q.wholeWord, replace: replacement });
+    this.query = query;
+    if (q.regex && q.text && !query.valid) return { count: 0, index: -1, error: S.find.regexError };
+    this.applyQuery(query);
+    if (!query.search || !this.editableOn) return { count: this.count(query), index: -1 };
+    if (all) {
+      replaceAll(this.view);
+      return { count: this.count(query), index: -1 };
+    }
+    // 고른 것이 일치가 아니면 replaceNext는 다음 일치를 고르기만 한다. 그때는 한 번 더 불러 바꾼다.
+    const sel = this.view.state.selection.main;
+    const onMatch = this.matchAt(query, sel.from, sel.to);
+    replaceNext(this.view);
+    if (!onMatch) replaceNext(this.view);
+    return this.status(query);
+  }
+
+  private matchAt(query: SearchQuery, from: number, to: number): boolean {
+    if (from === to) return false;
+    const cursor = query.getCursor(this.view.state, from, to);
+    const r = cursor.next();
+    return !r.done && r.value.from === from && r.value.to === to;
+  }
+
+  /** 일치 개수와 지금 선택한 일치의 순번 */
+  private status(query: SearchQuery): FindStatus {
+    const sel = this.view.state.selection.main;
+    const cursor = query.getCursor(this.view.state);
+    let i = 0;
+    let index = -1;
+    for (let r = cursor.next(); !r.done && i < MAX_MATCHES; r = cursor.next(), i++) {
+      if (r.value.from === sel.from && r.value.to === sel.to) index = i;
+    }
+    return { count: i, index };
+  }
+
   private applyQuery(query: SearchQuery) {
     openSearchPanel(this.view);
     this.view.dispatch({ effects: setSearchQuery.of(query) });
@@ -179,14 +350,7 @@ export class SourceView {
     const q = this.query;
     if (!q || !q.valid || !q.search) return { count: 0, index: -1 };
     (dir === 1 ? findNext : findPrevious)(this.view);
-    const sel = this.view.state.selection.main;
-    const cursor = q.getCursor(this.view.state);
-    let i = 0;
-    let index = -1;
-    for (let r = cursor.next(); !r.done && i < MAX_MATCHES; r = cursor.next(), i++) {
-      if (r.value.from === sel.from && r.value.to === sel.to) index = i;
-    }
-    return { count: i, index };
+    return this.status(q);
   }
 
   clearFind() {

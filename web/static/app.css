@@ -183,9 +183,23 @@ button:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--accent
 .recent-dir { font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* 찾기 바 */
-.findbar { display: flex; align-items: center; gap: 4px; padding: 5px 8px; border-bottom: 1px solid var(--line); background: var(--bg-chrome); flex: none; }
+.findbar { display: flex; flex-direction: column; gap: 4px; padding: 5px 8px; border-bottom: 1px solid var(--line); background: var(--bg-chrome); flex: none; }
+.find-row, .replace-row { display: flex; align-items: center; gap: 4px; }
+.replace-row[hidden] { display: none; }
 .findbar input { width: 280px; font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 4px 6px; }
-.findbar.no-match input { border-color: #d1242f; }
+.findbar.no-match input:not(.replace-input) { border-color: #d1242f; }
+.replace-button { padding: 3px 10px; }
+
+/* 편집: 고친 채 밖에서 바뀌었을 때의 알림 띠 (FR-EDIT-09) */
+#edit-bar { display: flex; gap: 12px; align-items: center; padding: 6px 12px; background: var(--bg-chrome); border-bottom: 2px solid var(--warn); font-size: 13px; flex: none; }
+#edit-bar[hidden] { display: none; }
+#edit-bar span { flex: 1; color: var(--warn); font-weight: 600; }
+#edit-bar button { font: inherit; padding: 3px 10px; border-radius: 4px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); cursor: pointer; }
+.tab.dirty .tab-name { font-style: italic; }
+.status-item.modified { color: var(--accent); font-weight: 600; }
+.dialog-field { display: flex; flex-direction: column; gap: 6px; }
+.dialog-field input { font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 5px 7px; min-width: 520px; max-width: 100%; }
+.dialog-hint { font-size: 12px; color: var(--fg-muted); }
 .find-toggle, .find-button { padding: 3px 7px; }
 .find-toggle[aria-pressed='true'] { background: var(--bg-active); border-color: var(--accent); }
 .find-count { min-width: 64px; text-align: center; color: var(--fg-muted); }
@@ -218,5 +232,5 @@ button:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--accent
 /* 인쇄 (FR-EXP-01): 미리보기만 인쇄한다. */
 @media print {
   html, body, #app, #body, #main, #views, .pane.preview, .preview-scroll { display: block !important; height: auto !important; overflow: visible !important; }
-  #menubar, #tabbar, #side, #resizer, #toc-side, #toc-resizer, #statusbar, #find-slot, #empty, .pane.source, .toast-box, .preview-notice, .mdv-mermaid-stage { display: none !important; }
+  #menubar, #tabbar, #side, #resizer, #toc-side, #toc-resizer, #statusbar, #find-slot, #edit-bar, #empty, .pane.source, .toast-box, .preview-notice, .mdv-mermaid-stage { display: none !important; }
 }

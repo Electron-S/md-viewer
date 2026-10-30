@@ -51,6 +51,7 @@ export class StatusBar {
       this.item(this.left, formatSize(doc.size), 'size');
       if (doc.decodeWarning) this.item(this.left, S.status.decodeWarning, 'warning').classList.add('warn');
       if (doc.state === 'deleted') this.item(this.left, S.status.deleted, 'deleted').classList.add('warn');
+      if (doc.dirty) this.item(this.left, S.status.modified, 'modified').classList.add('modified');
     }
     if (this.offline) this.item(this.right, S.status.offline, 'offline').classList.add('warn');
     if (mode) this.item(this.right, MODE_LABEL[mode], 'mode');

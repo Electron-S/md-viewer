@@ -1,5 +1,5 @@
 // 두 브리지가 함께 쓰는 규칙: 폴더 목록 거르기, 바이트를 문서로 바꾸기, 이미지 종류, 오류 문구.
-import { decodeBytes, type Encoding } from '../encoding';
+import { countEols, decodeBytes, eolOf, toLf, type Encoding } from '../encoding';
 import { isMarkdownPath, isTextPath } from '../render/paths';
 import { S } from '../strings';
 import { HostError, type DirEntry, type HostDoc } from './types';
@@ -28,12 +28,16 @@ export function filterEntries(entries: DirEntry[]): DirEntry[] {
 /** 원본 바이트를 file.read 결과로 바꾼다. 인코딩 판별은 여기 한 곳에서 한다 (SDD 8.3). */
 export function toHostDoc(path: string, bytes: Uint8Array, mtime: number, forced?: Encoding): HostDoc {
   const d = decodeBytes(bytes, forced);
+  const text = d.binary ? '' : d.text;
+  const counts = countEols(text);
   return {
     path,
-    text: d.binary ? '' : d.text,
+    // 편집기와 같은 형식(LF)으로 둔다. 저장할 때 eolCounts로 원래 줄 끝을 되돌린다 (SDD 8.3).
+    text: toLf(text),
     encoding: d.encoding,
     hasBom: d.hasBom,
-    eol: d.binary ? 'None' : d.eol,
+    eol: eolOf(counts),
+    eolCounts: counts,
     size: bytes.length,
     mtime,
     decodeWarning: d.decodeWarning,
@@ -54,6 +58,16 @@ const IMAGE_TYPES: Record<string, string> = {
   avif: 'image/avif',
 };
 
+/** file.write의 덮어쓰기 검사·새 파일 인자를 실행기·Windows 앱의 /api/write 쿼리로 (SDD 6.1~6.2) */
+export function writeQuery(p: Record<string, any>): Record<string, string> {
+  const q: Record<string, string> = {};
+  if (typeof p.baseMtime === 'number') q.baseMtime = String(Math.round(p.baseMtime));
+  if (typeof p.baseSize === 'number') q.baseSize = String(p.baseSize);
+  if (p.create) q.create = '1';
+  if (p.overwrite) q.overwrite = '1';
+  return q;
+}
+
 /** 브리지 오류 코드로 HostError를 만든다. 화면 문구가 없는 코드면 fallback(실행기가 준 문구 등)을 쓴다. */
 export function hostError(code: string, fallback?: string): HostError {
   const known: Record<string, string> = {
@@ -63,6 +77,8 @@ export function hostError(code: string, fallback?: string): HostError {
     ETOOBIG: S.error.tooBig,
     ENOTSUP: S.error.notSupported,
     EINVAL: S.error.badPath,
+    ECONFLICT: S.error.conflict,
+    EEXIST: S.error.exists,
   };
   return new HostError(code, known[code] ?? fallback ?? S.error.host);
 }

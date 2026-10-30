@@ -59,6 +59,113 @@ namespace MdViewer
 
         public static bool IsText(string path) { return string.Equals(Path.GetExtension(path), ".txt", StringComparison.OrdinalIgnoreCase); }
 
+        /// <summary>쓸 수 있는 문서 확장자인지 (NFR-SEC-05)</summary>
+        public static bool IsDocument(string path) { return IsMarkdown(path) || IsText(path); }
+
+        /// <summary>
+        /// 쓰기 허용 집합 (NFR-SEC-05). 이 앱은 읽기에 허용 폴더가 없으므로, 쓰기는 화면에 /api/read로 내준 문서와
+        /// 저장 대화상자로 사용자가 고른 경로로 좁힌다.
+        /// </summary>
+        static readonly HashSet<string> Writable = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        public static void AllowWrite(string path)
+        {
+            lock (Writable) Writable.Add(path);
+        }
+
+        static bool CanWrite(string path)
+        {
+            lock (Writable) return Writable.Contains(path);
+        }
+
+        /// <summary>
+        /// 문서를 원자적으로 쓴다 (FR-EDIT-04, NFR-SEC-05). 같은 폴더의 임시 파일에 쓰고 File.Replace로 바꿔 넣어 원본의 권한·속성을 지킨다.
+        /// baseMtime·baseSize가 있으면 디스크가 읽은 뒤 바뀌었는지 먼저 본다(ECONFLICT). 수정 시각·크기를 돌려준다.
+        /// </summary>
+        public static Dictionary<string, object> WriteBytes(string path, byte[] data, double? baseMtime, long? baseSize, bool create, bool overwrite)
+        {
+            path = Normalize(path);
+            if (!IsDocument(path)) throw new BridgeException("EACCES", Strings.NotDocument);
+            if (!CanWrite(path)) throw new BridgeException("EACCES", Strings.WriteNotAllowed);
+            if (data.LongLength > MaxFileBytes) throw new BridgeException("ETOOBIG", Strings.FileTooBig);
+            if (Directory.Exists(path)) throw new BridgeException("EISDIR", Strings.IsFolder);
+            var fi = new FileInfo(path);
+            bool exists = fi.Exists;
+            if (!exists && !create) throw new BridgeException("ENOENT", Strings.FileNotFound);
+            if (exists && create && !overwrite) throw new BridgeException("EEXIST", Strings.FileExists);
+            if (exists && baseMtime.HasValue)
+            {
+                double mt = Math.Round((fi.LastWriteTimeUtc - Epoch).TotalMilliseconds);
+                if (mt != Math.Round(baseMtime.Value) || (baseSize.HasValue && fi.Length != baseSize.Value))
+                    throw new BridgeException("ECONFLICT", Strings.ChangedOnDisk);
+            }
+            string dir = Path.GetDirectoryName(path);
+            if (dir == null || !Directory.Exists(dir)) throw new BridgeException("ENOENT", Strings.FolderNotFound);
+            string tmp = Path.Combine(dir, "." + Path.GetFileName(path) + "." + Guid.NewGuid().ToString("N").Substring(0, 8) + ".tmp");
+            try
+            {
+                using (var fs = new FileStream(tmp, FileMode.CreateNew, FileAccess.Write, FileShare.None, 65536))
+                {
+                    fs.Write(data, 0, data.Length);
+                    fs.Flush(true);
+                }
+                ReplaceWithRetry(tmp, path);
+            }
+            catch (UnauthorizedAccessException)
+            {
+                TryDelete(tmp);
+                throw new BridgeException("EACCES", Strings.AccessDenied);
+            }
+            catch (Exception)
+            {
+                TryDelete(tmp);
+                throw;
+            }
+            fi.Refresh();
+            var d = new Dictionary<string, object>();
+            d["mtime"] = Math.Round((fi.LastWriteTimeUtc - Epoch).TotalMilliseconds);
+            d["size"] = fi.Length;
+            return d;
+        }
+
+        /// <summary>
+        /// 임시 파일을 원본 자리에 바꿔 넣는다. 백신·인덱서가 잠깐 잡은 파일은 몇 번 다시 시도한다.
+        /// File.Replace를 지원하지 않는 위치(WSL·일부 네트워크 공유)는 내용을 복사해 바꾼다.
+        /// </summary>
+        static void ReplaceWithRetry(string tmp, string path)
+        {
+            for (int attempt = 0; ; attempt++)
+            {
+                try
+                {
+                    if (!File.Exists(path)) File.Move(tmp, path);
+                    else File.Replace(tmp, path, null, true);
+                    return;
+                }
+                catch (IOException)
+                {
+                    if (attempt < 5)
+                    {
+                        Thread.Sleep(50);
+                        continue;
+                    }
+                    if (!File.Exists(path)) throw;
+                    File.Copy(tmp, path, true);
+                    File.Delete(tmp);
+                    return;
+                }
+            }
+        }
+
+        static void TryDelete(string path)
+        {
+            try
+            {
+                if (File.Exists(path)) File.Delete(path);
+            }
+            catch (Exception) { }
+        }
+
         /// <summary>절대 경로만 받는다. 드라이브 상대(`\x`, `C:x`)는 거부한다.</summary>
         public static string Normalize(string path)
         {
@@ -86,6 +193,8 @@ namespace MdViewer
             byte[] bytes = ReadAllBytesShared(path);
             fi.Refresh();
             mtime = (fi.LastWriteTimeUtc - Epoch).TotalMilliseconds;
+            // 화면에 내준 문서는 고쳐 저장할 수 있다 (NFR-SEC-05).
+            if (IsDocument(path)) AllowWrite(path);
             return bytes;
         }
 

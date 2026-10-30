@@ -64,6 +64,9 @@ const ko = {
     internal: '실행기 내부 오류',
     viewerMissing: 'viewer.html이 없습니다',
     revealFailed: '탐색기에서 파일 위치를 열지 못했습니다',
+    notDocument: '문서 파일(Markdown·텍스트)에만 쓸 수 있습니다',
+    exists: '같은 이름의 파일이 이미 있습니다',
+    conflict: '파일을 읽은 뒤 다른 프로그램이 바꿨습니다',
   },
 
   // ---- 로그

@@ -1,7 +1,7 @@
 // 파일 핸들 브리지 (SDD 4장, 6.1, 7.2). 독립 모드에서 브라우저의 파일 API로 문서를 읽는다.
 // 위치는 `mdv:/<루트 id>/<상대 경로>`. 루트 id: 폴더 핸들 d, 파일 핸들 f, 핸들 없는 파일 u, 끌어다 놓은 폴더 항목 e.
 import { isEncoding, type Encoding } from '../encoding';
-import { normalizePath, isMarkdownPath, isTextPath } from '../render/paths';
+import { isDocumentPath, normalizePath, isMarkdownPath, isTextPath } from '../render/paths';
 import { S } from '../strings';
 import { filterEntries, hostError, imageType, MAX_FILE_BYTES, toHostDoc } from './listing';
 import { Emitter, HostError, type Bridge, type BridgeEvent, type DirEntry, type PathEntry, type ReadyInfo } from './types';
@@ -11,17 +11,24 @@ interface FsHandle {
   kind: 'file' | 'directory';
   name: string;
   isSameEntry(other: FsHandle): Promise<boolean>;
-  queryPermission?(o: { mode: 'read' }): Promise<PermissionState>;
-  requestPermission?(o: { mode: 'read' }): Promise<PermissionState>;
+  queryPermission?(o: { mode: 'read' | 'readwrite' }): Promise<PermissionState>;
+  requestPermission?(o: { mode: 'read' | 'readwrite' }): Promise<PermissionState>;
+}
+interface FsWritable {
+  write(data: BufferSource): Promise<void>;
+  close(): Promise<void>;
+  abort?(): Promise<void>;
 }
 interface FsFile extends FsHandle {
   kind: 'file';
   getFile(): Promise<File>;
+  /** 브라우저가 임시 파일에 쓰고 close()에서 바꿔 넣는다(원자적). */
+  createWritable?(): Promise<FsWritable>;
 }
 interface FsDir extends FsHandle {
   kind: 'directory';
   getDirectoryHandle(name: string): Promise<FsDir>;
-  getFileHandle(name: string): Promise<FsFile>;
+  getFileHandle(name: string, o?: { create?: boolean }): Promise<FsFile>;
   values(): AsyncIterable<FsFile | FsDir>;
   resolve(h: FsHandle): Promise<string[] | null>;
 }
@@ -162,6 +169,14 @@ export class LocalBridge implements Bridge {
         return { paths: await this.pickFiles() } as T;
       case 'dialog.openFolder':
         return { path: await this.pickFolder() } as T;
+      case 'file.write':
+        try {
+          return (await this.write(p.path, p.bytes, p)) as T;
+        } catch (e) {
+          throw mapError(e);
+        }
+      case 'dialog.saveFile':
+        return { path: await this.pickSave(String(p.suggestedName ?? '')) } as T;
       case 'watch.set':
         this.setWatch(p.paths ?? []);
         return {} as T;
@@ -337,6 +352,86 @@ export class LocalBridge implements Bridge {
       throw mapError(e);
     }
     return toHostDoc(normalizePath(path), bytes, file.lastModified, encoding);
+  }
+
+  // ------------------------------------------------------------------ 쓰기 (FR-EDIT-04~05)
+
+  /**
+   * 핸들로 연 문서에 쓴다. 쓰기 권한은 루트 핸들(폴더면 폴더 전체)에 받고, 처음 저장할 때 브라우저가 묻는다.
+   * 권한 요청은 사용자 입력(Ctrl+S·대화상자 단추) 안에서만 된다. prompt가 false면 묻지 않고 거절한다(자동 저장).
+   * 핸들 없는 문서(input·옛 끌어다 놓기)는 ENOTSUP. 화면이 다른 이름으로 저장으로 넘긴다.
+   */
+  private async write(
+    path: string,
+    bytes: Uint8Array,
+    o: { baseMtime?: number; baseSize?: number; create?: boolean; overwrite?: boolean; prompt?: boolean },
+  ): Promise<{ mtime: number; size: number }> {
+    const { root, rel } = this.parse(path);
+    if (root.kind !== 'dir' && root.kind !== 'file') throw hostError('ENOTSUP');
+    if (!isDocumentPath(rel || root.name)) throw hostError('EACCES');
+    const perm = root.dir ?? root.file;
+    let state = await perm?.queryPermission?.({ mode: 'readwrite' }).catch(() => 'prompt' as PermissionState);
+    if (state !== 'granted' && o.prompt !== false) state = await perm?.requestPermission?.({ mode: 'readwrite' });
+    if (state !== 'granted') throw hostError('EACCES');
+    let handle: FsFile;
+    let existed = true;
+    try {
+      handle = await this.fileHandleAt(root, rel);
+    } catch (e) {
+      if (!o.create || mapError(e).code !== 'ENOENT' || root.kind !== 'dir') throw e;
+      const segs = rel.split('/').filter(Boolean);
+      let dir = root.dir!;
+      for (const s of segs.slice(0, -1)) dir = await dir.getDirectoryHandle(s);
+      handle = await dir.getFileHandle(segs[segs.length - 1], { create: true });
+      existed = false;
+    }
+    if (existed) {
+      const cur = await handle.getFile();
+      if (o.create && !o.overwrite) throw hostError('EEXIST');
+      if (typeof o.baseMtime === 'number' && (cur.lastModified !== o.baseMtime || (typeof o.baseSize === 'number' && cur.size !== o.baseSize))) {
+        throw hostError('ECONFLICT');
+      }
+    }
+    if (typeof handle.createWritable !== 'function') throw hostError('ENOTSUP');
+    const w = await handle.createWritable();
+    try {
+      await w.write(bytes as Uint8Array<ArrayBuffer>);
+      await w.close();
+    } catch (e) {
+      await w.abort?.().catch(() => {});
+      throw e;
+    }
+    const f = await handle.getFile();
+    // 자기가 쓴 변경을 1초 폴링이 밖의 변경으로 알리지 않게 기준을 옮긴다 (FR-EDIT-09).
+    const w2 = this.watched.get(normalizePath(path));
+    if (w2) {
+      w2.stamp = `${f.lastModified}:${f.size}`;
+      w2.gone = false;
+    }
+    return { mtime: f.lastModified, size: f.size };
+  }
+
+  /** 다른 이름으로 저장할 위치 (FR-EDIT-05). 브라우저 저장 대화상자가 없으면(Firefox·Safari) ENOTSUP: 화면이 내려받기로 대신한다. */
+  private async pickSave(suggestedName: string): Promise<string | null> {
+    const w = window as any;
+    if (typeof w.showSaveFilePicker !== 'function') throw hostError('ENOTSUP');
+    let h: FsFile;
+    try {
+      h = await w.showSaveFilePicker({
+        suggestedName,
+        types: [{ description: S.picker.documents, accept: { 'text/markdown': DOC_ACCEPT.filter((x) => x !== '.txt'), 'text/plain': ['.txt'] } }],
+      });
+    } catch (e) {
+      if ((e as Error)?.name === 'AbortError') return null;
+      throw mapError(e);
+    }
+    // 저장 대화상자로 고른 핸들에는 쓰기 권한이 이미 있다. 연 폴더 기준 위치로 바꾸면 폴더 전체 권한을 또 물으므로 파일 루트로 둔다.
+    for (const r of this.roots.values()) {
+      if (r.kind === 'file' && r.file && !r.locked && (await r.file.isSameEntry(h).catch(() => false))) return `mdv:/${r.id}/${r.name}`;
+    }
+    const id = this.nextId('f');
+    this.addRoot({ id, kind: 'file', name: h.name, file: h });
+    return `mdv:/${id}/${h.name}`;
   }
 
   private async list(path: string): Promise<DirEntry[]> {

@@ -65,7 +65,9 @@ test('줄 끝 판별', () => {
 
 test('파일 읽기 결과: 종류·줄 끝·BOM·바이너리 (FR-FILE-08, NFR-ENC-03)', () => {
   let d = toHostDoc('/docs/한글 문서.md', Uint8Array.from([0xef, 0xbb, 0xbf, ...utf8('# 제목\r\n본문\r\n')]), 5);
-  assert.deepEqual([d.text, d.kind, d.eol, d.hasBom, d.binary, d.size, d.mtime], ['# 제목\r\n본문\r\n', 'markdown', 'CRLF', true, false, 21, 5]);
+  // 본문은 편집기와 같은 LF로 두고 원래 줄 끝은 eol·eolCounts에 남긴다 (v2.0, SDD 5.1).
+  assert.deepEqual([d.text, d.kind, d.eol, d.hasBom, d.binary, d.size, d.mtime], ['# 제목\n본문\n', 'markdown', 'CRLF', true, false, 21, 5]);
+  assert.deepEqual(d.eolCounts, { crlf: 2, lf: 0, cr: 0 });
   d = toHostDoc('C:\\메모.txt', hex('b8deb8f00a'), 0);
   assert.deepEqual([d.kind, d.encoding, d.text], ['text', 'cp949', '메모\n']);
   d = toHostDoc('C:\\메모.txt', hex('b8deb8f00a'), 0, 'utf-8');

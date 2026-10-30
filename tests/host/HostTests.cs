@@ -128,6 +128,42 @@ namespace MdViewer.Tests
                 Eq(Code(() => FileService.ReadBytes("상대.md", out mtime)), "EINVAL", "상대 경로");
             });
 
+            Test("문서 쓰기: 읽어 준 파일만, 문서 확장자만, 충돌·새 파일 검사, 원자적 교체 (FR-EDIT-04~05, NFR-SEC-05)", () =>
+            {
+                string dir = Path.Combine(tmp, "쓰기 폴더");
+                Directory.CreateDirectory(dir);
+                string doc = Path.Combine(dir, "고칠 문서.md");
+                File.WriteAllBytes(doc, Encoding.UTF8.GetBytes("old"));
+                byte[] data = new UTF8Encoding(true).GetPreamble().Concat(Encoding.UTF8.GetBytes("# 새 제목\r\n본문\r\n")).ToArray();
+                Eq(Code(() => FileService.WriteBytes(doc, data, null, null, false, false)), "EACCES", "화면에 읽어 주지 않은 파일은 거부");
+                double mtime;
+                FileService.ReadBytes(doc, out mtime);
+                Dictionary<string, object> r = null;
+                Eq(Code(() => { r = FileService.WriteBytes(doc, data, mtime, 3, false, false); }), "OK", "읽은 그대로의 기준이면 쓴다");
+                Check(File.ReadAllBytes(doc).SequenceEqual(data), "BOM·CRLF까지 바이트 그대로");
+                Eq(r["size"], (long)data.Length, "크기");
+                double now = (File.GetLastWriteTimeUtc(doc) - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds;
+                Check(Math.Abs((double)r["mtime"] - now) < 1, "수정 시각");
+                Eq(Directory.GetFiles(dir, "*.tmp").Length, 0, "임시 파일이 남지 않는다");
+                Eq(Code(() => FileService.WriteBytes(doc, data, mtime - 5000, data.Length, false, false)), "ECONFLICT", "읽은 뒤 바뀜");
+                Eq(Code(() => FileService.WriteBytes(doc, data, null, null, true, false)), "EEXIST", "새 파일 자리에 파일이 있음");
+                Eq(Code(() => FileService.WriteBytes(doc, data, null, null, true, true)), "OK", "덮어쓰기를 고르면 쓴다");
+                string script = Path.Combine(dir, "run.cmd");
+                FileService.AllowWrite(script);
+                Eq(Code(() => FileService.WriteBytes(script, data, null, null, true, false)), "EACCES", "문서가 아닌 확장자");
+                Check(!File.Exists(script), "만들지 않는다");
+                string fresh = Path.Combine(dir, "새 문서.md");
+                Eq(Code(() => FileService.WriteBytes(fresh, data, null, null, true, false)), "EACCES", "저장 대화상자로 고르지 않은 새 파일");
+                FileService.AllowWrite(FileService.Normalize(fresh));
+                Eq(Code(() => FileService.WriteBytes(fresh, data, null, null, true, false)), "OK", "고른 새 파일");
+                Check(File.ReadAllBytes(fresh).SequenceEqual(data), "새 파일 내용");
+                Eq(Code(() => FileService.WriteBytes(Path.Combine(dir, "없음.md"), data, null, null, false, false)), "EACCES", "읽은 적 없는 없는 파일");
+                File.SetAttributes(doc, FileAttributes.ReadOnly);
+                Eq(Code(() => FileService.WriteBytes(doc, data, null, null, false, false)), "EACCES", "읽기 전용 파일");
+                File.SetAttributes(doc, FileAttributes.Normal);
+                Eq(Directory.GetFiles(dir, "*.tmp").Length, 0, "실패해도 임시 파일이 남지 않는다");
+            });
+
             Test("네트워크 공유: 사용자가 연 공유의 그림만 응답 (SDD 8.4)", () =>
             {
                 Eq(FileService.ShareRoot(@"\\nas\docs\a\b.png"), @"\\nas\docs", "공유 루트");

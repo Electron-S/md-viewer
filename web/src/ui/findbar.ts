@@ -1,13 +1,19 @@
 import { S } from '../strings';
 import type { FindQuery, FindStatus } from '../views/find';
 
-/** 찾기 바 (FR-FIND-01~02). Enter 다음, Shift+Enter 이전, Esc 닫기. */
+/**
+ * 찾기 바 (FR-FIND-01~02). Enter 다음, Shift+Enter 이전, Esc 닫기.
+ * 찾아 바꾸기(FR-EDIT-07, Ctrl+H)로 열면 아래에 바꾸기 줄이 보인다. 바꾸기 칸에서 Enter는 바꾸기, Ctrl+Alt+Enter는 모두 바꾸기.
+ */
 export class FindBar {
   readonly el: HTMLElement;
   onQuery: (q: FindQuery) => FindStatus = () => ({ count: 0, index: -1 });
   onStep: (dir: 1 | -1) => FindStatus = () => ({ count: 0, index: -1 });
+  onReplace: (q: FindQuery, replacement: string, all: boolean) => FindStatus = () => ({ count: 0, index: -1 });
   onClose: () => void = () => {};
   private input: HTMLInputElement;
+  private replaceInput: HTMLInputElement;
+  private replaceRow: HTMLElement;
   private count: HTMLElement;
   private opts = { caseSensitive: false, wholeWord: false, regex: false };
   private dirty = true;
@@ -51,7 +57,9 @@ export class FindBar {
       b.addEventListener('click', run);
       return b;
     };
-    this.el.append(
+    const findRow = document.createElement('div');
+    findRow.className = 'find-row';
+    findRow.append(
       this.input,
       toggle('Aa', S.find.caseSensitive, 'caseSensitive'),
       toggle(S.find.wholeWordButton, S.find.wholeWord, 'wholeWord'),
@@ -61,6 +69,35 @@ export class FindBar {
       btn('↓', S.find.next, () => this.step(1)),
       btn('×', S.find.close, () => this.close()),
     );
+    this.replaceInput = document.createElement('input');
+    this.replaceInput.type = 'text';
+    this.replaceInput.className = 'replace-input';
+    this.replaceInput.placeholder = S.find.replacePlaceholder;
+    this.replaceInput.setAttribute('aria-label', S.find.replaceLabel);
+    this.replaceInput.spellcheck = false;
+    const textBtn = (label: string, title: string, run: () => void) => {
+      const b = btn(label, title, run);
+      b.classList.add('replace-button');
+      return b;
+    };
+    this.replaceRow = document.createElement('div');
+    this.replaceRow.className = 'replace-row';
+    this.replaceRow.hidden = true;
+    this.replaceRow.append(
+      this.replaceInput,
+      textBtn(S.find.replaceOne, S.find.replaceOneTitle, () => this.replace(false)),
+      textBtn(S.find.replaceAll, S.find.replaceAllTitle, () => this.replace(true)),
+    );
+    this.el.append(findRow, this.replaceRow);
+    this.replaceInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.isComposing) {
+        e.preventDefault();
+        this.replace(e.ctrlKey && e.altKey);
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        this.close();
+      }
+    });
     this.input.addEventListener('input', () => {
       this.dirty = true;
       if (this.timer) clearTimeout(this.timer);
@@ -85,15 +122,36 @@ export class FindBar {
     return { text: this.input.value, ...this.opts };
   }
 
-  open(prefill?: string) {
+  /** replace가 참이면 바꾸기 줄을 보이고 그 칸으로 간다(찾을 내용이 있을 때). 거짓이면 감춘다. 없으면 그대로 둔다. */
+  open(prefill?: string, replace?: boolean) {
     this.el.hidden = false;
+    if (replace !== undefined) this.replaceRow.hidden = !replace;
     if (prefill && !prefill.includes('\n')) {
       this.input.value = prefill;
       this.dirty = true;
     }
-    this.input.focus();
-    this.input.select();
+    if (replace && this.input.value) {
+      this.replaceInput.focus();
+      this.replaceInput.select();
+    } else {
+      this.input.focus();
+      this.input.select();
+    }
     if (this.dirty) this.runQuery();
+  }
+
+  get replacing(): boolean {
+    return !this.el.hidden && !this.replaceRow.hidden;
+  }
+
+  /** 바꾸기 (FR-EDIT-07). 결과는 찾기와 같이 일치 개수로 보인다. */
+  replace(all: boolean) {
+    if (!this.input.value) {
+      this.input.focus();
+      return;
+    }
+    this.dirty = false;
+    this.show(this.onReplace(this.query(), this.replaceInput.value, all));
   }
 
   close() {

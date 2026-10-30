@@ -67,16 +67,18 @@ export class TabBar {
     for (const tab of this.tabs.tabs) {
       const doc = this.getDoc(tab.docId);
       const deleted = doc?.state === 'deleted';
+      const dirty = !!doc?.dirty;
       const t = document.createElement('div');
-      t.className = 'tab' + (tab.id === active ? ' active' : '') + (deleted ? ' deleted' : '');
+      t.className = 'tab' + (tab.id === active ? ' active' : '') + (deleted ? ' deleted' : '') + (dirty ? ' dirty' : '');
       t.setAttribute('role', 'tab');
       t.setAttribute('aria-selected', String(tab.id === active));
       t.dataset.id = String(tab.id);
-      t.title = this.displayPath(tab.path) + (deleted ? '\n' + S.tab.deletedTooltip : '');
+      t.title = this.displayPath(tab.path) + (deleted ? '\n' + S.tab.deletedTooltip : '') + (dirty ? '\n' + S.tab.dirtyTooltip : '');
       t.draggable = true;
       const name = document.createElement('span');
       name.className = 'tab-name';
-      name.textContent = basename(tab.path) + (deleted ? S.tab.deletedSuffix : '');
+      // 저장하지 않은 문서는 이름 앞에 표시를 단다 (FR-EDIT-02).
+      name.textContent = (dirty ? S.tab.dirtyMark : '') + basename(tab.path) + (deleted ? S.tab.deletedSuffix : '');
       const close = document.createElement('button');
       close.className = 'tab-close';
       close.textContent = '×';

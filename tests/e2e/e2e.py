@@ -267,6 +267,20 @@ def prepare_launcher_docs():
     write(odd / '만 행 표.md', '| 번호 | 값 | 끝 |\n| - | - | - |\n' + ''.join(f'| {k} | 값 {k} | 끝 |\n' for k in range(10000)))
     write(odd / '긴 한 줄.md', '한' * 100000 + '\n')
     write(odd / '빈 파일.md', '')
+    # 편집과 저장 (FR-EDIT, NFR-ENC-05)
+    ed = DOCS / '편집'
+    ed.mkdir(exist_ok=True)
+    (ed / '고칠 문서.md').write_bytes(b'\xef\xbb\xbf' + '# 편집 시험\r\n\r\n사과 사과 사과\r\n'.encode('utf-8'))
+    write(ed / '완성형.md', '# 완성형\n\n똠방각하 본문\n', encoding='cp949')
+    write(ed / '충돌.md', '# 충돌\n\n원래 내용\n')
+    write(ed / '닫기.md', '# 닫기\n\n원래\n')
+    write(ed / '자동.md', '# 자동 저장\n')
+    write(ed / '바꾸기.md', '# 바꾸기\n\n사과 하나, 사과 둘, 사과 셋\n')
+    hundred, i = [], 0
+    while sum(len(x.encode('utf-8')) for x in hundred) < 100_000:
+        hundred.append(f'## 백 킬로 절 {i}\n\n' + '백 킬로 문서의 본문 문장입니다. ' * 8 + '\n\n')
+        i += 1
+    write(ed / '백 킬로.md', ''.join(hundred))
     return readme
 
 
@@ -378,6 +392,16 @@ def get(port, path, host=None):
     return r.status, headers, body
 
 
+def post(port, path, body: bytes, headers: dict):
+    """쓰기 거부 검사용 POST(Origin·형식을 마음대로 정한다)."""
+    c = http.client.HTTPConnection('127.0.0.1', port, timeout=10)
+    c.request('POST', path, body=body, headers={'Host': f'127.0.0.1:{port}', **headers})
+    r = c.getresponse()
+    r.read()
+    c.close()
+    return r.status
+
+
 # ---------------------------------------------------------------- 브라우저 조종
 
 def launch(pw, name):
@@ -466,6 +490,81 @@ def cdp_drop(v, paths):
     for t in ('dragEnter', 'dragOver', 'drop'):
         cdp.send('Input.dispatchDragEvent', {'type': t, 'x': 640, 'y': 400, 'data': data})
     cdp.detach()
+
+
+# ---------------------------------------------------------------- 편집 (FR-EDIT)
+
+def ed_source(v):
+    """활성 탭을 원문 보기로 바꾸고 편집기가 그 문서를 보일 때까지 기다린다."""
+    if v.ev('() => __mdv.tabs.active().mode') != 'source':
+        v.ev("() => __mdv.cmds.run('view.source')")
+    v.wait('() => !!__mdv.source && __mdv.source.docId === __mdv.activeDoc()?.id', 8000)
+
+
+def ed_type(v, text):
+    """편집기 끝에 실제 키 입력으로 글을 친다."""
+    v.page.locator('.pane.source .cm-content').click()
+    v.key('Control+End')
+    v.page.keyboard.type(text)
+
+
+def ed_dirty(v, want=True, timeout=5000):
+    try:
+        v.wait('(w) => !!__mdv.activeDoc()?.dirty === w', timeout, arg=want)
+    except Exception:
+        # 저장이 실패했으면 그 이유가 알림에 있다.
+        dlg = v.ev('() => document.querySelector("dialog[open]")?.textContent ?? null')
+        raise RuntimeError(f'수정됨이 {want}가 되지 않음. 알림: {v.page.locator(".toast").all_inner_texts()[-3:]} 대화상자: {dlg}')
+
+
+def ed_text(v):
+    return v.ev('() => __mdv.source.textOf(__mdv.activeDoc().id)')
+
+
+def ed_dialog(v, label, timeout=5000):
+    """뷰어 대화상자의 단추를 누르고 대화상자 본문을 돌려준다."""
+    dlg = v.page.locator('dialog.mdv-dialog[open]')
+    dlg.wait_for(timeout=timeout)
+    body = dlg.locator('.dialog-body').inner_text()
+    dlg.get_by_role('button', name=label, exact=True).click()
+    v.page.wait_for_timeout(200)
+    return body
+
+
+def ed_prompt(v, value, timeout=5000):
+    """경로 입력 대화상자(실행기 모드의 다른 이름으로 저장)에 값을 넣고 Enter. 원래 값을 돌려준다."""
+    dlg = v.page.locator('dialog.mdv-dialog[open]')
+    dlg.wait_for(timeout=timeout)
+    inp = dlg.locator('input')
+    old = inp.input_value()
+    inp.fill(value)
+    inp.press('Enter')
+    v.page.wait_for_timeout(200)
+    return old
+
+
+# 편집 뒤 미리보기에 표지가 보이기까지(입력이 멈춘 때부터)의 시간 (NFR-PERF-08)
+EDIT_TO_PREVIEW = '''async (m) => {
+    const v = __mdv.source.view;
+    const t0 = performance.now();
+    v.dispatch({ changes: { from: v.state.doc.length, insert: '\\n\\n' + m }, userEvent: 'input.type' });
+    while (!__mdv.preview.article.textContent.includes(m)) await new Promise(r => requestAnimationFrame(r));
+    return performance.now() - t0;
+}'''
+# 키 입력 하나가 화면에 반영되기까지(다음 프레임) 10회
+KEY_LATENCY = '''async () => {
+    const v = __mdv.source.view;
+    const out = [];
+    for (let i = 0; i < 10; i++) {
+        const t0 = performance.now();
+        v.dispatch({ changes: { from: v.state.selection.main.head, insert: 'x' }, userEvent: 'input.type' });
+        await new Promise(r => requestAnimationFrame(r));
+        out.push(performance.now() - t0);
+    }
+    return out;
+}'''
+# 고친 내용을 버리고 탭을 닫는다(확인 없이, 시험 정리용)
+ED_DISCARD_CLOSE = '''() => { const t = __mdv.tabs.active(); __mdv.edit.discard(t.docId); __mdv.tabs.close(t.id); }'''
 
 
 # ---------------------------------------------------------------- 실행기 모드: 기능
@@ -559,7 +658,7 @@ def run_launcher(pw, L, ctx):
         src_visible = a.page.locator('.pane.source').is_visible() and not a.page.locator('.pane.preview').is_visible()
         gutters = a.page.locator('.cm-lineNumbers .cm-gutterElement').count()
         check('FR-VIEW-02', '원문 보기: 줄 번호와 Markdown 강조', src_visible and gutters > 5 and a.page.locator('.cm-content [class*="ͼ"]').count() > 0, f'gutters={gutters}')
-        check('ARCH-02', '원문 보기는 편집기 컴포넌트의 읽기 전용 모드', a.ev('() => __mdv.source.view.state.readOnly') is True)
+        check('ARCH-02', '원문 보기는 편집기 컴포넌트이고 v2.0부터 편집할 수 있다(FR-EDIT-01)', a.ev('() => __mdv.source.view.state.readOnly') is False)
         a.key('Control+3')
         both = a.page.locator('.pane.source').is_visible() and a.page.locator('.pane.preview').is_visible()
         check('FR-VIEW-01', '미리보기·원문·분할 전환', both and a.state()['mode'] == 'split')
@@ -583,7 +682,7 @@ def run_launcher(pw, L, ctx):
         a.ev('() => { __mdv.preview.el.scrollTop = 0; }')
         a.key('Control+f')
         bar = a.page.locator('.findbar')
-        a.page.locator('.findbar input').fill('사과')
+        a.page.locator('.findbar .find-row input').fill('사과')
         a.page.wait_for_timeout(400)
         count = a.page.locator('.find-count').inner_text()
         marks = a.ev('() => __mdv.preview.root.querySelectorAll("mark.mdv-hit").length')
@@ -591,24 +690,24 @@ def run_launcher(pw, L, ctx):
         cur_n = a.page.locator('.find-count').inner_text()
         check('FR-FIND-01', '찾기·다음·일치 개수', bar.is_visible() and count == '3개' and cur_n == '1/3' and marks == 3, f'{count} {cur_n} marks={marks}')
         a.page.locator('.find-toggle[data-opt="regex"]').click()
-        a.page.locator('.findbar input').fill('긴 절 1[0-3]')
+        a.page.locator('.findbar .find-row input').fill('긴 절 1[0-3]')
         a.page.wait_for_timeout(400)
         rcount = a.page.locator('.find-count').inner_text()
         a.page.locator('.find-toggle[data-opt="regex"]').click()
         a.page.locator('.find-toggle[data-opt="wholeWord"]').click()
-        a.page.locator('.findbar input').fill('문장')
+        a.page.locator('.findbar .find-row input').fill('문장')
         a.page.wait_for_timeout(400)
         wcount = a.page.locator('.find-count').inner_text()
         a.page.locator('.find-toggle[data-opt="wholeWord"]').click()
         check('FR-FIND-02', '정규식·단어 단위 옵션', rcount == '4개' and wcount == '결과 없음', f'regex={rcount} word={wcount}')
         a.key('Control+2')
         a.key('Control+f')
-        a.page.locator('.findbar input').fill('def')
+        a.page.locator('.findbar .find-row input').fill('def')
         a.page.wait_for_timeout(400)
         scount = a.page.locator('.find-count').inner_text()
         hl = a.page.locator('.cm-searchMatch').count()
         check('FR-FIND-03', '원문 보기에서도 찾고 강조', scount == '1개' and hl >= 1, f'{scount} hl={hl}')
-        a.page.locator('.findbar input').press('Escape')
+        a.page.locator('.findbar .find-row input').press('Escape')
         a.page.wait_for_timeout(200)
         a.key('Control+1')
         check('FR-FIND-01', 'Esc로 닫으면 강조 해제', not bar.is_visible() and a.ev('() => __mdv.preview.root.querySelectorAll("mark").length') == 0)
@@ -641,7 +740,7 @@ def run_launcher(pw, L, ctx):
         }''')
         url0 = a.page.url
         keys = ['F5', 'Control+p', 'Control+b', 'Control+b', 'Control+2', 'Control+1', 'Control+=', 'Control+-', 'Control+0',
-                'Alt+ArrowLeft', 'Alt+ArrowRight', 'Control+g', 'Control+Shift+O', 'Control+Shift+F', 'F3', 'Shift+F3']
+                'Alt+ArrowLeft', 'Alt+ArrowRight', 'Control+g', 'Control+Shift+O', 'Control+Shift+F', 'F3', 'Shift+F3', 'Control+s', 'Control+h']
         for k in keys:
             a.key(k)
         a.page.wait_for_timeout(300)
@@ -677,6 +776,9 @@ def run_launcher(pw, L, ctx):
         a.open_file(P(DOCS / 'binary.md'))
         msg = a.ev("() => __mdv.preview.article.textContent")
         check('NFR-REL-01', '바이너리 파일은 내용 대신 안내', '바이너리' in msg, msg[:60])
+        ed_source(a)
+        check('FR-EDIT-01', '바이너리 파일은 원문 보기에서도 읽기 전용', a.ev('() => __mdv.source.view.state.readOnly') is True)
+        a.key('Control+1')
         t0 = time.time()
         a.open_file(P(DOCS / 'big.md'))
         dt = time.time() - t0
@@ -1041,6 +1143,206 @@ def run_launcher(pw, L, ctx):
         check('FR-FILE-05', '모든 탭을 닫고 파일이 바뀐 뒤 다시 열면 새 내용', a.h1() == '새 내용', a.h1())
     guard('FR-FILE-05', '닫은 탭 다시 열기', t_stale_reopen)
 
+    ED = DOCS / '편집'
+
+    def t_edit_save():
+        a = cur[0]
+        f = ED / '고칠 문서.md'
+        a.open_file(P(f))
+        ed_source(a)
+        ed_type(a, '추가 줄')
+        ed_dirty(a)
+        st = a.status()
+        check('FR-EDIT-02', '고치면 탭·창 제목·상태 표시줄에 수정됨 표시', a.page.locator('.tab.active.dirty').count() == 1 and a.page.title().startswith('●') and '수정됨' in st,
+              f'{a.page.title()} | {st}')
+        for _ in range(8):
+            if '추가' not in ed_text(a):
+                break
+            a.key('Control+z')
+        ed_dirty(a, False)
+        check('FR-EDIT-01', '실행 취소(Ctrl+Z)로 저장한 내용과 같아지면 수정됨이 꺼진다', a.page.locator('.tab.active.dirty').count() == 0 and not a.page.title().startswith('●'), a.page.title())
+        a.key('Control+y')
+        ed_dirty(a)
+        check('FR-EDIT-01', '다시 실행(Ctrl+Y)', '추가 줄' in ed_text(a))
+        a.key('Control+s')
+        ed_dirty(a, False)
+        want = b'\xef\xbb\xbf' + '# 편집 시험\r\n\r\n사과 사과 사과\r\n추가 줄'.encode('utf-8')
+        got = f.read_bytes()
+        check('FR-EDIT-04', 'Ctrl+S: 원래 인코딩·BOM·줄 끝(UTF-8 BOM, CRLF)으로 제자리에 저장한다', got == want, got[:60])
+        ver = a.ev('() => __mdv.activeDoc().version')
+        a.page.wait_for_timeout(1500)
+        check('FR-EDIT-09', '자기 저장의 감시 알림으로 다시 읽거나 충돌 띠를 띄우지 않는다',
+              not a.page.locator('#edit-bar').is_visible() and a.ev('() => __mdv.activeDoc().version') == ver and not a.ev('() => __mdv.activeDoc().dirty'))
+    guard('FR-EDIT-04', '편집·저장', t_edit_save)
+
+    def t_edit_cp949():
+        a = cur[0]
+        f = ED / '완성형.md'
+        a.open_file(P(f))
+        ed_source(a)
+        ed_type(a, '가나')
+        ed_dirty(a)
+        a.key('Control+s')
+        ed_dirty(a, False)
+        got = f.read_bytes()
+        check('NFR-ENC-05', 'CP949 문서(확장 글자 똠 포함)를 CP949로 저장한다', got == '# 완성형\n\n똠방각하 본문\n가나'.encode('cp949'), got)
+        ed_type(a, ' 😀')
+        ed_dirty(a)
+        a.key('Control+s')
+        body = ed_dialog(a, 'UTF-8로 저장')
+        ed_dirty(a, False)
+        got = f.read_bytes().decode('utf-8', errors='replace')
+        enc = a.page.locator('[data-field="encoding"]').inner_text()
+        check('FR-EDIT-04', 'CP949에 없는 글자(😀)가 있으면 UTF-8로 저장할지 묻고 UTF-8로 쓴다', '😀' in body and got.endswith('가나 😀') and enc == 'UTF-8', f'{body} | {got[-10:]} | {enc}')
+    guard('NFR-ENC-05', '인코딩 지켜 저장', t_edit_cp949)
+
+    def t_edit_conflict():
+        a = cur[0]
+        f = ED / '충돌.md'
+        a.open_file(P(f))
+        ed_source(a)
+        ed_type(a, '내 수정')
+        ed_dirty(a)
+        write(f, '# 충돌\n\n밖에서 고침\n')
+        a.wait('() => !document.getElementById("edit-bar").hidden', 6000)
+        bar = a.page.locator('#edit-bar').inner_text()
+        check('FR-EDIT-09', '고친 채 밖에서 바뀌면 덮지 않고 알림 띠를 띄운다', '내 수정' in ed_text(a) and '밖에서' in bar, bar)
+        a.page.locator('#edit-bar button', has_text='내 것 유지').click()
+        a.key('Control+s')
+        body = ed_dialog(a, '덮어쓰기')
+        ed_dirty(a, False)
+        check('FR-EDIT-09', '내 것을 두고 저장하면 디스크가 바뀌었다고 묻고, 고르면 덮어쓴다', '바꿨습니다' in body and f.read_bytes().decode('utf-8').endswith('내 수정'), body)
+        ed_type(a, ' 둘째')
+        ed_dirty(a)
+        write(f, '# 충돌\n\n밖에서 또 고침\n')
+        a.wait('() => !document.getElementById("edit-bar").hidden', 6000)
+        a.page.locator('#edit-bar button', has_text='디스크 내용으로 다시 읽기').click()
+        a.wait('() => !__mdv.activeDoc().dirty && __mdv.source.textOf(__mdv.activeDoc().id)?.includes("또 고침")', 6000)
+        check('FR-EDIT-09', '다시 읽기를 고르면 고친 내용을 버리고 디스크 내용을 보인다', not a.page.locator('#edit-bar').is_visible() and '둘째' not in ed_text(a))
+    guard('FR-EDIT-09', '외부 변경 충돌', t_edit_conflict)
+
+    def t_edit_close():
+        a = cur[0]
+        f = ED / '닫기.md'
+        orig = f.read_bytes()
+        a.open_file(P(f))
+        ed_source(a)
+        ed_type(a, '버릴 내용')
+        ed_dirty(a)
+        n0 = len(a.state()['tabs'])
+        a.key('Alt+w')
+        body = ed_dialog(a, '취소')
+        kept = len(a.state()['tabs']) == n0 and a.state()['active'] == P(f)
+        a.key('Alt+w')
+        ed_dialog(a, '저장 안 함')
+        a.wait('(n) => __mdv.tabs.tabs.length === n - 1', 3000, arg=n0)
+        check('FR-EDIT-08', '고친 탭을 닫으면 묻는다: 취소는 남기고, 저장 안 함은 버리고 닫는다', kept and '닫기.md' in body and f.read_bytes() == orig, body)
+        a.open_file(P(f))
+        check('FR-EDIT-08', '저장 안 함으로 닫은 문서를 다시 열면 디스크 내용이다', '버릴' not in a.ev('() => __mdv.activeDoc().text'))
+        ed_source(a)
+        ed_type(a, '저장할 내용')
+        ed_dirty(a)
+        a.key('Alt+w')
+        ed_dialog(a, '저장')
+        a.wait('(n) => __mdv.tabs.tabs.length === n - 1', 5000, arg=n0)
+        check('FR-EDIT-08', '닫기 확인에서 저장을 고르면 저장하고 닫는다', f.read_bytes().decode('utf-8').endswith('저장할 내용'))
+    guard('FR-EDIT-08', '닫기 확인', t_edit_close)
+
+    def t_edit_new_saveas():
+        a = cur[0]
+        a.key('Alt+Shift+n')
+        a.wait('() => __mdv.activeDoc()?.untitled === true && __mdv.tabs.active().mode === "source"', 8000)
+        a.wait('() => !!__mdv.source && __mdv.source.docId === __mdv.activeDoc().id', 8000)
+        name = a.ev('() => __mdv.tabs.active().path')
+        a.page.locator('.pane.source .cm-content').click()
+        a.page.keyboard.type('# 새로 만든 문서\n\n본문')
+        ed_dirty(a)
+        a.key('Control+s')
+        target = ED / '새로 만든 문서.md'
+        default = ed_prompt(a, P(target))
+        a.wait('(p) => __mdv.tabs.active()?.path === p && !__mdv.activeDoc().dirty', 6000, arg=P(target))
+        check('FR-EDIT-06', '새 문서(Alt+Shift+N)를 원문 보기로 열고, 처음 저장할 때 경로를 물어 그 파일로 저장한다',
+              '제목 없음' in name and default.endswith('.md') and target.read_bytes() == '# 새로 만든 문서\n\n본문'.encode('utf-8'), f'{name} | {default}')
+        f = ED / '고칠 문서.md'
+        a.open_file(P(f))
+        before = f.read_bytes()
+        n0 = len(a.state()['tabs'])
+        a.key('Control+Shift+s')
+        other = ED / '다른 이름.md'
+        ed_prompt(a, P(other))
+        a.wait('(p) => __mdv.tabs.active()?.path === p', 6000, arg=P(other))
+        check('FR-EDIT-05', '다른 이름으로 저장(Ctrl+Shift+S): 같은 형식으로 새 파일에 쓰고 탭이 새 파일을 가리킨다',
+              other.read_bytes() == before and f.read_bytes() == before and len(a.state()['tabs']) == n0, other.read_bytes()[:20])
+        outside = pathlib.Path('\\\\wsl.localhost\\' + DISTRO + '\\tmp\\mdv-e2e-outside.md')
+        a.key('Control+Shift+s')
+        ed_prompt(a, '/tmp/mdv-e2e-outside.md')
+        a.page.wait_for_timeout(500)
+        toasts = a.page.locator('.toast').all_inner_texts()
+        check('NFR-SEC-05', '실행기 허용 폴더 밖으로는 다른 이름으로 저장하지 않는다', any('허용된 폴더 밖' in t for t in toasts) and not outside.exists(), toasts[-2:])
+    guard('FR-EDIT-05', '새 문서·다른 이름으로 저장', t_edit_new_saveas)
+
+    def t_edit_replace():
+        a = cur[0]
+        f = ED / '바꾸기.md'
+        a.open_file(P(f))
+        ed_source(a)
+        a.key('Control+h')
+        a.page.locator('.findbar .find-row input').fill('사과')
+        a.page.locator('.findbar .replace-input').fill('배')
+        a.page.locator('.findbar .replace-button', has_text='모두 바꾸기').click()
+        a.page.wait_for_timeout(200)
+        t1 = ed_text(a)
+        a.page.locator('.pane.source .cm-content').click()
+        a.key('Control+z')
+        t2 = ed_text(a)
+        ed_dirty(a, False)
+        check('FR-EDIT-07', '찾아 바꾸기(Ctrl+H): 모두 바꾸기 뒤 실행 취소 한 번으로 돌아온다',
+              t1.count('배') == 3 and '사과' not in t1 and t2.count('사과') == 3 and a.page.locator('.findbar .replace-row').is_visible(), f'{t1!r} → {t2!r}')
+        a.page.locator('.findbar .find-row input').press('Escape')
+    guard('FR-EDIT-07', '찾아 바꾸기', t_edit_replace)
+
+    def t_edit_autosave():
+        a = cur[0]
+        f = ED / '자동.md'
+        a.open_file(P(f))
+        ed_source(a)
+        a.ev("() => __mdv.cmds.run('settings.autoSave')")
+        t0 = time.time()
+        ed_type(a, '자동으로')
+        ed_dirty(a)
+        ed_dirty(a, False, 6000)
+        dt = time.time() - t0
+        got = f.read_bytes().decode('utf-8')
+        a.ev("() => __mdv.cmds.run('settings.autoSave')")
+        check('FR-EDIT-10', '자동 저장을 켜면 입력이 멈추고 약 1초 뒤 저장한다', got.endswith('자동으로') and a.ev('() => __mdv.settings.autoSave') is False, f'{dt:.1f}s')
+    guard('FR-EDIT-10', '자동 저장', t_edit_autosave)
+
+    def t_edit_perf():
+        a = cur[0]
+        a.open_file(P(ED / '백 킬로.md'))
+        a.ev("() => __mdv.cmds.run('view.split')")
+        a.wait('() => !!__mdv.source && __mdv.source.docId === __mdv.activeDoc().id', 8000)
+        a.page.wait_for_timeout(300)
+        lat = [a.ev(EDIT_TO_PREVIEW, f'표지백{i}') for i in range(5)]
+        a.ev(ED_DISCARD_CLOSE)
+        med100 = statistics.median(lat)
+        check('NFR-PERF-08', '100 KB 문서 분할 보기: 입력이 멈춘 뒤 미리보기 반영 0.5초 이하(5회 중앙값)', med100 <= 500, f'{med100:.0f} ms (max {max(lat):.0f})')
+        a.open_file(P(DOCS / 'one-mb.md'))
+        a.ev("() => __mdv.cmds.run('view.split')")
+        a.wait('() => !!__mdv.source && __mdv.source.docId === __mdv.activeDoc().id', 8000)
+        a.page.wait_for_timeout(500)
+        lat1 = [a.ev(EDIT_TO_PREVIEW, f'표지메가{i}') for i in range(3)]
+        med1 = statistics.median(lat1)
+        a.ev("() => __mdv.cmds.run('view.source')")
+        a.page.wait_for_timeout(300)
+        keys = a.ev(KEY_LATENCY)
+        medk = statistics.median(keys)
+        a.ev(ED_DISCARD_CLOSE)
+        check('NFR-PERF-08', '1 MB 문서 분할 보기: 입력이 멈춘 뒤 미리보기 반영 2초 이하(3회 중앙값)', med1 <= 2000, f'{med1:.0f} ms (max {max(lat1):.0f})')
+        check('NFR-PERF-08', '1 MB 문서 원문 보기: 키 입력 반영 50 ms 이하(10회 중앙값)', medk <= 50, f'{medk:.1f} ms (max {max(keys):.1f})')
+        check('FR-EDIT-01', '편집 시험 뒤 화면 스크립트 오류 없음', not a.errors, a.errors[:3])
+    guard('NFR-PERF-08', '편집 반응', t_edit_perf)
+
     def t_abnormal():
         # 깊은 중첩, 1만 행 표, 10만 자 한 줄, 빈 파일 (NFR-REL-01)
         a = cur[0]
@@ -1268,6 +1570,20 @@ def run_security(L):
     check('NFR-SEC-02', 'localhost로 오면 127.0.0.1로 돌려보낸다(저장소를 한 origin에)', st == 302 and h.get('location', '').startswith(f'http://127.0.0.1:{port}/'), f'{st} {h.get("location")}')
     st, _, body = get(port, f'/api/read?t={tok}&path={doc}')
     check('NFR-SEC-02', '정상 요청은 통과(대조군)', st == 200 and body.startswith('# 사용 설명서'.encode('utf-8')), st)
+    # 쓰기 (NFR-SEC-02·05): 토큰·Origin·형식·허용 폴더·확장자
+    origin = {'Origin': f'http://127.0.0.1:{port}', 'Content-Type': 'application/octet-stream'}
+    before = (DOCS / 'README.md').read_bytes()
+    w = {
+        '토큰 없는 쓰기': post(port, f'/api/write?path={doc}', b'x', origin),
+        '다른 Origin': post(port, f'/api/write?t={tok}&path={doc}', b'x', {**origin, 'Origin': 'http://evil.example'}),
+        'Origin 없음': post(port, f'/api/write?t={tok}&path={doc}', b'x', {'Content-Type': 'application/octet-stream'}),
+        '허용 폴더 밖': post(port, f'/api/write?t={tok}&path={quote("/tmp/mdv-e2e-w.md")}&create=1', b'x', origin),
+        '심볼릭 링크로 빠져나가기': post(port, f'/api/write?t={tok}&path={quote(P(DOCS) + "/밖으로/mdv-e2e.md")}&create=1', b'x', origin),
+        '문서가 아닌 확장자': post(port, f'/api/write?t={tok}&path={quote(P(DOCS) + "/run.sh")}&create=1', b'x', origin),
+    }
+    form = post(port, f'/api/write?t={tok}&path={doc}', b'x', {**origin, 'Content-Type': 'text/plain'})
+    check('NFR-SEC-05', '쓰기: 무토큰·다른 Origin·허용 폴더 밖·문서가 아닌 확장자는 403, 단순 요청 형식은 400, 파일은 그대로',
+          all(c == 403 for c in w.values()) and form == 400 and (DOCS / 'README.md').read_bytes() == before and not (DOCS / 'run.sh').exists(), {**w, 'text/plain': form})
 
 
 def run_idle(pw, ctx):
@@ -1618,6 +1934,69 @@ def run_desktop(pw):
             check('FR-VIEW-04', 'Windows 앱: 테마를 바꾸면 화면과 제목 표시줄에 알린다(오류 없음)', dark == 'dark' and not v.errors, v.errors)
         guard('FR-VIEW-04', 'Windows 앱 테마', t_theme)
 
+        def t_edit():
+            v = cur[0].v
+            f = docs / '고칠 앱 문서.md'
+            f.write_bytes('# 앱 편집\r\n\r\n본문\r\n'.encode('utf-8'))
+            never = write(docs / '읽지 않은 문서.md', '# 그대로\n')
+            v.open_file(str(f))
+            ed_source(v)
+            ed_type(v, '앱에서 고침')
+            ed_dirty(v)
+            v.key('Control+s')
+            ed_dirty(v, False)
+            check('FR-EDIT-04', 'Windows 앱: 고쳐 Ctrl+S로 저장하면 원래 형식(CRLF)으로 디스크에 쓴다',
+                  f.read_bytes() == '# 앱 편집\r\n\r\n본문\r\n앱에서 고침'.encode('utf-8'), f.read_bytes()[-30:])
+            r = v.ev('''async (p) => {
+                const w = async (path, q = '', method = 'POST') => {
+                    const r = await fetch('/api/write?path=' + encodeURIComponent(path) + q, { method, headers: { 'content-type': 'application/octet-stream' }, body: method === 'POST' ? new Uint8Array([120]) : undefined });
+                    return [r.status, (await r.json()).code];
+                };
+                return { never: await w(p.never), ext: await w(p.ext, '&create=1'), get: await w(p.doc, '', 'GET') };
+            }''', {'never': str(never), 'ext': str(docs / 'run.cmd'), 'doc': str(f)})
+            check('NFR-SEC-05', 'Windows 앱: 읽어 준 적 없는 파일·문서가 아닌 확장자에는 쓰지 않고, POST만 받는다',
+                  r == {'never': [403, 'EACCES'], 'ext': [403, 'EACCES'], 'get': [403, 'EFORBIDDEN']} and never.read_bytes() == '# 그대로\n'.encode('utf-8') and not (docs / 'run.cmd').exists(), r)
+            # 고친 채 창을 닫으면 묻는다: 취소하면 창이 남고, 저장하면 저장하고 닫힌다 (FR-EDIT-08).
+            ed_type(v, ' 닫기 전')
+            ed_dirty(v)
+            v.page.wait_for_timeout(300)  # app.setDirty가 호스트에 닿게 한다
+            hwnd = app_window(cur[0].proc.pid)
+            user32.PostMessageW(hwnd, WM_SYSCOMMAND, SC_CLOSE, 0)
+            body = ed_dialog(v, '취소')
+            v.page.wait_for_timeout(1500)
+            alive = cur[0].proc.poll() is None and v.ev('() => 1') == 1
+            user32.PostMessageW(hwnd, WM_SYSCOMMAND, SC_CLOSE, 0)
+            # 저장을 누르면 저장하고 곧바로 앱이 끝나므로 누른 뒤 페이지를 기다리지 않는다.
+            dlg = v.page.locator('dialog.mdv-dialog[open]')
+            dlg.wait_for(timeout=5000)
+            try:
+                dlg.get_by_role('button', name='저장', exact=True).click(no_wait_after=True)
+            except Exception:
+                pass
+            try:
+                code = cur[0].proc.wait(10)
+            except subprocess.TimeoutExpired:
+                code = None
+            check('FR-EDIT-08', 'Windows 앱: 고친 채 창을 닫으면 묻고, 취소하면 창이 남고 저장하면 저장한 뒤 닫힌다',
+                  '고칠 앱 문서.md' in body and alive and code == 0 and f.read_bytes().decode('utf-8').endswith('닫기 전'), f'{body} alive={alive} code={code}')
+            try:
+                cur[0].browser.close()
+            except Exception:
+                pass
+            cur[0] = App(pw, [], profile, regroot)
+            cur[0].v.page.wait_for_selector('body[data-restored="1"]', timeout=20000)
+        def t_edit_safe():
+            try:
+                t_edit()
+            except Exception:
+                # 고친 채 남으면 뒤의 닫기 시험이 확인 대화상자에서 멈추므로 버린다.
+                try:
+                    cur[0].v.ev('() => { document.querySelector("dialog[open]")?.close(); for (const d of __mdv.docs.all()) __mdv.edit.discard(d.id); }')
+                except Exception:
+                    pass
+                raise
+        guard('FR-EDIT-08', 'Windows 앱 편집·저장', t_edit_safe)
+
         def t_close_restore():
             v = cur[0].v
             v.open_file(first)
@@ -1722,7 +2101,7 @@ def run_standalone(pw):
                 document.dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
             }''')
             v.wait('() => __mdv.tabs.active()?.path.endsWith("/합성.md")', 5000)
-            check('FR-FILE-01', '핸들 없는 파일(합성 drop)도 읽기 전용 탭으로 연다', v.h1() == '합성 문서')
+            check('FR-FILE-01', '핸들 없는 파일(합성 drop)도 탭으로 연다', v.h1() == '합성 문서')
         guard('FR-FILE-01', '독립 모드 합성 끌어다 놓기', t_synthetic_drop)
 
         def t_diagrams():
@@ -1738,6 +2117,44 @@ def run_standalone(pw):
             check('FR-REN-07', '독립 모드(file://): Mermaid 번들을 풀어 실행하고 다이어그램을 그린다', diagrams_ok(r) and not r['over'] and not v.errors,
                   {k: r[k] for k in ('n', 'widths', 'pending', 'errors', 'over')})
         guard('FR-REN-07', '독립 모드 Mermaid', t_diagrams)
+
+        def t_edit_standalone():
+            # 핸들 없는 문서는 저장 대화상자가 없는 브라우저(Firefox·Safari)처럼 내려받기로 저장한다 (FR-EDIT-05).
+            v.ev('''() => {
+                const dt = new DataTransfer();
+                dt.items.add(new File(['# 내려받을 문서\\n'], '내려받기.md', { type: 'text/markdown' }));
+                document.dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
+            }''')
+            v.wait('() => __mdv.tabs.active()?.path.endsWith("/내려받기.md")', 5000)
+            v.ev("() => Object.defineProperty(window, 'showSaveFilePicker', { value: undefined, configurable: true, writable: true })")
+            ed_source(v)
+            ed_type(v, '고침')
+            ed_dirty(v)
+            with v.page.expect_download(timeout=8000) as d:
+                v.key('Control+s')
+            data = pathlib.Path(d.value.path()).read_bytes()
+            ed_dirty(v, False)
+            check('FR-EDIT-05', '독립 모드: 핸들 없는 문서는 저장 대화상자가 없으면 내려받기로 저장한다',
+                  d.value.suggested_filename == '내려받기.md' and data == '# 내려받을 문서\n고침'.encode('utf-8'), f'{d.value.suggested_filename} {data[:40]}')
+            v.ev(ED_DISCARD_CLOSE)
+            # 파일 핸들 문서: 쓰기 권한을 거절하면 저장하지 않고 알린다(권한 창은 수동 점검). 고친 내용은 남는다.
+            cdp_drop(v, [SA / 'b.md'])
+            v.wait('() => __mdv.tabs.active()?.path.startsWith("mdv:/f") && __mdv.tabs.active()?.path.endsWith("/b.md")', 8000)
+            v.ev('''() => {
+                const p = FileSystemHandle.prototype;
+                p.queryPermission = async () => 'prompt';
+                p.requestPermission = async () => 'denied';
+            }''')
+            ed_source(v)
+            ed_type(v, '권한 없음')
+            ed_dirty(v)
+            v.key('Control+s')
+            v.page.wait_for_timeout(500)
+            toasts = v.page.locator('.toast').all_inner_texts()
+            check('FR-EDIT-04', '독립 모드: 쓰기 권한이 없으면 파일을 바꾸지 않고 알리며, 고친 내용은 남는다',
+                  any('쓰기 권한' in t for t in toasts) and v.ev('() => __mdv.activeDoc().dirty') and (SA / 'b.md').read_bytes() == '# 옆 문서\n'.encode('utf-8'), toasts[-2:])
+            v.ev(ED_DISCARD_CLOSE)
+        guard('FR-EDIT-05', '독립 모드 편집·저장', t_edit_standalone)
 
         def t_reload():
             # 핸들이 있는 위치만 세션에 남는다. 다시 열면 권한에 따라 바로 복원되거나 복원 버튼이 뜬다 (SDD 7.4).

@@ -128,6 +128,17 @@ namespace MdViewer
                 case "dialog.openFolder":
                     Reply(id, Obj("path", form.PickFolder()));
                     break;
+                case "dialog.saveFile":
+                    Reply(id, Obj("path", form.PickSave(Str(p, "suggestedName"), Str(p, "dir"))));
+                    break;
+                case "app.setDirty":
+                    form.SetDirty(Bool(p, "dirty"));
+                    Reply(id, Empty());
+                    break;
+                case "app.cancelClose":
+                    form.CancelClose();
+                    Reply(id, Empty());
+                    break;
                 case "drop.paths":
                     Reply(id, Obj("entries", FileService.Entries(dropped ?? new List<string>())));
                     break;

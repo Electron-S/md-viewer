@@ -24,6 +24,13 @@ const ko = {
   mode: { preview: '미리보기', source: '원문 보기', split: '분할 보기' },
 
   cmd: {
+    fileNew: '새 문서',
+    fileSave: '저장',
+    fileSaveAs: '다른 이름으로 저장…',
+    editUndo: '실행 취소',
+    editRedo: '다시 실행',
+    editReplace: '찾아 바꾸기…',
+    autoSave: '자동 저장',
     fileOpen: '열기…',
     fileOpenFolder: '폴더 열기…',
     fileReload: '새로 고침',
@@ -62,6 +69,7 @@ const ko = {
 
   menu: {
     file: '파일',
+    edit: '편집',
     view: '보기',
     find: '찾기',
     go: '이동',
@@ -79,6 +87,7 @@ const ko = {
 
   dialog: {
     ok: '확인',
+    cancel: '취소',
     version: (v: string) => `버전 ${v}`,
     modeStandalone: '독립 모드: 브라우저에서 직접 연 뷰어',
     modeLauncher: '실행기 모드: mdview 실행기가 띄운 뷰어',
@@ -115,6 +124,43 @@ const ko = {
     openFolder: '폴더 열기',
   },
 
+  /** 편집과 저장 (FR-EDIT-01~10) */
+  edit: {
+    untitled: (n: number) => `제목 없음 ${n}.md`,
+    closeTitle: '저장하지 않은 변경',
+    closeBody: (name: string) => `${name}의 변경 내용을 저장할까요?`,
+    save: '저장',
+    dontSave: '저장 안 함',
+    cancel: '취소',
+    conflictTitle: '파일이 바뀜',
+    conflictBody: (name: string) => `${name}을(를) 읽은 뒤 다른 프로그램이 파일을 바꿨습니다. 내 내용으로 덮어쓸까요?`,
+    existsBody: (name: string) => `${name}이(가) 이미 있습니다. 바꿀까요?`,
+    overwrite: '덮어쓰기',
+    encodingTitle: '인코딩',
+    unencodableBody: (enc: string, chars: string) => `${enc}로 나타낼 수 없는 글자(${chars})가 있습니다. UTF-8로 바꿔 저장할까요?`,
+    saveUtf8: 'UTF-8로 저장',
+    lossyBody: '이 문서는 읽을 때 잘못된 바이트가 있었습니다. 저장하면 그 자리가 대체 문자(�)로 바뀝니다. 저장할까요?',
+    mixedEol: (eol: string) => `줄 끝이 섞여 있어 ${eol}로 맞춰 저장했습니다.`,
+    downloaded: (name: string) => `내려받기 폴더에 저장했습니다: ${name}`,
+    saveFailed: (name: string, msg: string) => `저장하지 못했습니다: ${name} — ${msg}`,
+    writeDenied: '쓰기 권한이 없습니다. 다시 저장하면(Ctrl+S) 브라우저가 권한을 묻습니다.',
+    autoSavePaused: (name: string, msg: string) => `자동 저장을 멈췄습니다: ${name} — ${msg}`,
+    binary: '바이너리 파일은 편집·저장하지 않습니다.',
+    discardTitle: '변경 내용 버리기',
+    discardBody: (name: string) => `${name}의 저장하지 않은 변경을 버리고 디스크에서 다시 읽을까요?`,
+    discard: '버리고 다시 읽기',
+    changedBar: '밖에서 파일이 바뀌었습니다. 이 탭에는 저장하지 않은 변경이 있습니다.',
+    reloadDisk: '디스크 내용으로 다시 읽기',
+    keepMine: '내 것 유지',
+    saveAsTitle: '다른 이름으로 저장',
+    saveAsLabel: '저장할 파일 경로',
+    saveAsHint: (roots: string) => `실행기가 허용한 폴더 안에만 저장할 수 있습니다: ${roots}`,
+    outsideRoots: '허용된 폴더 밖입니다. 그 폴더를 mdview로 열거나 mdview --root <폴더>로 허용한 뒤 저장하세요.',
+    notDocument: 'Markdown·텍스트 확장자(.md, .txt 등)로 저장하세요.',
+    alreadyOpenDirty: (name: string) => `${name}이(가) 다른 탭에서 저장하지 않은 채 열려 있어 그 이름으로 저장할 수 없습니다.`,
+    handoverBlocked: '새 뷰어 탭이 열렸지만, 저장하지 않은 문서가 있어 이 탭을 그대로 둡니다.',
+  },
+
   /** 실행기 모드에서 새 뷰어 탭이 열려 이 탭이 물러났을 때 (SDD 7.3) */
   retired: {
     title: 'MD Viewer (새 탭으로 옮겨짐)',
@@ -146,6 +192,12 @@ const ko = {
     noResult: '결과 없음',
     count: (n: number) => `${n}개`,
     regexError: '정규식 오류',
+    replacePlaceholder: '바꿀 내용',
+    replaceLabel: '바꿀 내용',
+    replaceOne: '바꾸기',
+    replaceAll: '모두 바꾸기',
+    replaceOneTitle: '바꾸기 (Enter)',
+    replaceAllTitle: '모두 바꾸기 (Ctrl+Alt+Enter)',
   },
 
   status: {
@@ -157,11 +209,14 @@ const ko = {
     decodeWarning: '⚠ 읽지 못한 문자가 있음',
     deleted: '디스크에서 삭제됨',
     offline: '⚠ 실행기 연결 끊김',
+    modified: '수정됨',
   },
 
   tab: {
     deletedTooltip: '(디스크에서 삭제됨)',
     deletedSuffix: ' (삭제됨)',
+    dirtyMark: '● ',
+    dirtyTooltip: '(저장하지 않은 변경)',
     closeTooltip: '탭 닫기 (Alt+W)',
     close: '탭 닫기',
   },
@@ -174,6 +229,8 @@ const ko = {
     tooBig: '200 MB를 넘는 파일은 열 수 없습니다',
     notSupported: '이 방식으로 연 파일에서는 할 수 없습니다. 파일을 다시 열어 주세요.',
     badPath: '열 수 없는 위치입니다',
+    conflict: '파일을 읽은 뒤 다른 프로그램이 바꿨습니다',
+    exists: '같은 이름의 파일이 이미 있습니다',
     offline: '실행기에 연결할 수 없습니다. mdview로 다시 열어 주세요.',
     sourceModuleMissing: '원문 보기 모듈이 없습니다',
     diagramModuleMissing: '다이어그램(Mermaid) 모듈이 없습니다',

@@ -355,3 +355,70 @@ test('홈 폴더는 0700, state.json은 0600으로 만든다', { skip: process.p
   assert.equal(fs.statSync(path.join(h, 'state.json')).mode & 0o777, 0o600);
   await a.close('test');
 });
+
+/** 뷰어 페이지가 보내는 모양의 쓰기 요청 */
+const write = (file: string, body: string | Buffer, extra: Record<string, string> = {}, headers: Record<string, string> = {}) =>
+  request(srv.port, `/api/write${q(srv.token, { path: file, ...extra })}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/octet-stream', origin: `http://127.0.0.1:${srv.port}`, ...headers },
+    body,
+  });
+
+test('쓰기: 바이트를 그대로 원자적으로 쓰고 수정 시각·크기를 돌려준다. 임시 파일이 남지 않는다 (FR-EDIT-04, NFR-SEC-05)', async () => {
+  const file = path.join(docs, '쓰기 시험.md');
+  fs.writeFileSync(file, 'old', 'utf8');
+  if (process.platform !== 'win32') fs.chmodSync(file, 0o640);
+  const bytes = Buffer.from([0xef, 0xbb, 0xbf, ...Buffer.from('# 새 내용\r\n본문\r\n', 'utf8')]);
+  const r = await write(file, bytes);
+  assert.equal(r.status, 200);
+  const st = fs.statSync(file);
+  assert.deepEqual(r.json(), { mtime: Math.round(st.mtimeMs), size: bytes.length });
+  assert.deepEqual(fs.readFileSync(file), bytes, 'BOM·CRLF까지 바이트가 같다');
+  if (process.platform !== 'win32') assert.equal(st.mode & 0o777, 0o640, '원래 권한을 지킨다');
+  assert.deepEqual(fs.readdirSync(docs).filter((n) => n.endsWith('.tmp')), [], '임시 파일이 남지 않는다');
+  // 읽은 그대로의 기준(수정 시각·크기)이면 덮어쓴다.
+  const again = await write(file, 'v2', { baseMtime: String(r.json().mtime), baseSize: String(bytes.length) });
+  assert.equal(again.status, 200);
+  assert.equal(fs.readFileSync(file, 'utf8'), 'v2');
+});
+
+test('쓰기: 읽은 뒤 바뀌었으면 409 ECONFLICT, 새 파일 자리에 파일이 있으면 409 EEXIST (FR-EDIT-05·09)', async () => {
+  const file = path.join(docs, 'conflict.md');
+  fs.writeFileSync(file, 'base', 'utf8');
+  const base = fs.statSync(file);
+  fs.writeFileSync(file, 'changed outside', 'utf8');
+  const c = await write(file, 'mine', { baseMtime: String(Math.round(base.mtimeMs)), baseSize: String(base.size) });
+  assert.deepEqual([c.status, c.json().code], [409, 'ECONFLICT']);
+  assert.equal(fs.readFileSync(file, 'utf8'), 'changed outside', '덮어쓰지 않는다');
+  const exists = await write(file, 'new', { create: '1' });
+  assert.deepEqual([exists.status, exists.json().code], [409, 'EEXIST']);
+  assert.equal((await write(file, 'new', { create: '1', overwrite: '1' })).status, 200);
+  const fresh = path.join(docs, '새 문서.md');
+  assert.equal((await write(fresh, '# 새 문서\n', { create: '1' })).status, 200);
+  assert.equal(fs.readFileSync(fresh, 'utf8'), '# 새 문서\n');
+  assert.deepEqual([(await write(path.join(docs, 'none.md'), 'x')).status], [404], 'create 없이 없는 파일에는 쓰지 않는다');
+  assert.equal((await write(path.join(docs, '없는 폴더', 'a.md'), 'x', { create: '1' })).status, 404, '상위 폴더가 없으면 404');
+  assert.deepEqual([(await write(path.join(docs, 'img'), 'x')).status], [403], '확장자가 문서가 아니면(폴더 포함) 거부');
+});
+
+test('쓰기 거부: 토큰·Origin·형식·허용 폴더 밖·심볼릭 링크 탈출·문서가 아닌 확장자·크기 상한 (NFR-SEC-02·05)', async () => {
+  const file = path.join(docs, 'README.md');
+  const before = fs.readFileSync(file);
+  const noToken = await request(srv.port, `/api/write?path=${encodeURIComponent(file)}`, {
+    method: 'POST', headers: { 'content-type': 'application/octet-stream', origin: `http://127.0.0.1:${srv.port}` }, body: 'x',
+  });
+  assert.equal(noToken.status, 403);
+  assert.equal((await write(file, 'x', {}, { origin: 'http://evil.example' })).status, 403, '다른 출처');
+  assert.equal((await write(file, 'x', {}, { origin: '' })).status, 403, 'Origin 없음');
+  assert.equal((await write(file, 'x', {}, { 'content-type': 'text/plain' })).status, 400, 'octet-stream만');
+  assert.equal((await write(file, 'x', {}, { 'content-type': 'application/json' })).status, 400);
+  assert.deepEqual([(await write(path.join(outside, 'secret.md'), 'x')).status], [403], '허용 폴더 밖');
+  assert.deepEqual([(await write(path.join(docs, 'escape', 'secret.md'), 'x')).status], [403], '심볼릭 링크로 빠져나가기');
+  assert.deepEqual([(await write(path.join(docs, '..', path.basename(outside), 'secret.md'), 'x')).status], [403], '.. 로 빠져나가기');
+  assert.deepEqual([(await write(path.join(docs, 'run.sh'), 'x', { create: '1' })).status], [403], '문서가 아닌 확장자');
+  assert.equal(fs.existsSync(path.join(docs, 'run.sh')), false);
+  assert.deepEqual([(await write(path.join(docs, 'img', 'dot.png'), 'x')).status], [403]);
+  assert.equal((await write(file, Buffer.alloc(2048, 0x61))).status, 413, '크기 상한(maxBytes)');
+  assert.equal(fs.readFileSync(path.join(outside, 'secret.md'), 'utf8'), 'secret');
+  assert.deepEqual(fs.readFileSync(file), before, '거부한 요청은 파일을 바꾸지 않는다');
+});

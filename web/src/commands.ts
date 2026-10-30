@@ -10,6 +10,11 @@ export interface Command {
   checked?: () => boolean;
   /** v1.1 이후 기능. 키만 잡아 브라우저 기본 동작을 막고, 메뉴·단축키 목록에는 보이지 않는다. */
   reserved?: boolean;
+  /**
+   * 메뉴·단축키 목록에만 보이는 키. 전역 키로 잡지 않는다. 실행 취소(Ctrl+Z)처럼 편집기나 입력 칸이 직접 받아야 하는 키다
+   * (찾기 칸의 실행 취소를 빼앗지 않게, SDD 6.3).
+   */
+  keyHint?: string[];
 }
 
 const CODE_NAMES: Record<string, string> = {
@@ -100,7 +105,8 @@ export class CommandRegistry {
   }
 
   keyFor(id: string): string | undefined {
-    return this.cmds.get(id)?.keys?.[0];
+    const c = this.cmds.get(id);
+    return c?.keys?.[0] ?? c?.keyHint?.[0];
   }
 
   commandForKey(key: string): string | undefined {

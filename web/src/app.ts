@@ -1,9 +1,10 @@
 import { createBridge, HostError, type HostDoc, type PathEntry, type ReadyInfo } from './bridge';
 import { CommandRegistry } from './commands';
 import { DocStore, encodingLabel, formatSize, type DocModel, type Encoding } from './docs';
+import { EditController } from './edit';
 import { DiagramRenderer } from './render/diagrams';
 import { createMarkdown, DIAGRAM_CLASS, renderMarkdown, scanHeadings, type Heading } from './render/markdown';
-import { basename, dirname, docKey } from './render/paths';
+import { basename, dirname, docKey, isUntitledPath } from './render/paths';
 import { createSanitizer, isViewablePath } from './render/sanitize';
 import {
   Debouncer, LIST_MIN, MAX_RECENT_FILES, MAX_RECENT_FOLDERS, PANEL_MAX, PANEL_MIN, parseSession, parseSettings, pushRecent, SCHEMA_VERSION,
@@ -73,7 +74,11 @@ export class App {
     clean: (svg, id) => this.sanitizer.sanitizeDiagram(svg, id),
     width: () => this.preview.contentWidth(),
     // 다이어그램 구문 오류는 문서의 문제이고 화면에 안내도 하므로 앱 오류가 아닌 경고로 남긴다.
-    onFailed: (line, msg) => this.logWarn(S.log.diagramFailed(this.activeDoc()?.path ?? '', line, msg)),
+    // 고치는 중인 문서는 쓰다 만 구문이 많으므로 로그에 남기지 않는다 (SDD 8.1).
+    onFailed: (line, msg) => {
+      const doc = this.activeDoc();
+      if (!doc?.dirty) this.logWarn(S.log.diagramFailed(doc?.path ?? '', line, msg));
+    },
     onLoadFailed: (msg) => this.logError(S.log.diagramModuleFailed(msg)),
     // 원문 코드가 다이어그램으로 바뀌었으므로 열려 있는 찾기를 다시 돈다.
     onIdle: () => this.findbar.refresh(),
@@ -88,6 +93,26 @@ export class App {
   private statusbar!: StatusBar;
   private findbar = new FindBar();
   private sync!: ScrollSync;
+  /** 편집 조정자 (FR-EDIT-01~10, SDD 7.7) */
+  readonly edit = new EditController(
+    {
+      bridge: this.bridge,
+      docs: this.docs,
+      tabs: this.tabs,
+      source: () => this.source,
+      autoSave: () => this.settings.autoSave,
+      roots: () => this.info?.roots ?? [],
+      workspace: () => this.session.workspace,
+      readDoc: (path, enc) => this.readDoc(path, enc),
+      edited: (doc) => this.onEdited(doc),
+      moved: (oldId, doc) => this.onMoved(oldId, doc),
+      closeTab: (id) => void this.tabs.close(id),
+      log: (msg) => this.logError(msg),
+    },
+    $('edit-bar'),
+  );
+  /** 마지막으로 보인 탭의 문서. 탭을 옮길 때 떠나는 문서를 자동 저장한다 (FR-EDIT-10). */
+  private lastActiveDoc: string | null = null;
 
   private renderCache = new Map<string, Rendered>();
   private shown: { docId: string; version: number; allowRemote: boolean; dark: boolean } | null = null;
@@ -118,8 +143,8 @@ export class App {
     this.buildLayout();
     this.registerCommands();
     this.menubar = new MenuBar($('menubar'), this.cmds, this.menus());
-    this.tabbar = new TabBar($('tabbar'), this.tabs, (id) => this.docs.get(id), (p) => this.bridge.displayPath(p));
-    this.tabbar.onClose = (id) => this.closeTab(id);
+    this.tabbar = new TabBar($('tabbar'), this.tabs, (id) => this.docs.get(id), (p) => this.displayPath(p));
+    this.tabbar.onClose = (id) => void this.closeTab(id);
     this.tabbar.onOpenDialog = () => this.cmds.run('file.open');
     this.statusbar = new StatusBar($('statusbar'));
     this.statusbar.onEncodingClick = () => this.menubar.open(this.menuIndex(S.menu.encoding), true);
@@ -215,6 +240,11 @@ export class App {
       const m = e.data;
       if (!m || m.from === this.viewerId || this.retired) return;
       if (m.type === 'hello') {
+        // 저장하지 않은 문서가 있으면 물러나지 않는다. 새 탭은 저장된 세션으로 연다 (FR-EDIT-08, FR-FILE-04).
+        if (this.edit.hasDirty()) {
+          toast(S.edit.handoverBlocked);
+          return;
+        }
         ch.postMessage({ type: 'handover', from: this.viewerId, to: m.from, tabs: this.sessionData().tabs, workspace: this.session.workspace });
         this.retire();
         ch.close();
@@ -266,6 +296,7 @@ export class App {
 
     this.findbar.onQuery = (q) => this.runFind(q);
     this.findbar.onStep = (d) => this.stepFind(d);
+    this.findbar.onReplace = (q, rep, all) => this.runReplace(q, rep, all);
     this.findbar.onClose = () => {
       this.preview.clearFind();
       this.source?.clearFind();
@@ -334,26 +365,35 @@ export class App {
 
     this.tabs.onChange((kind) => {
       if (kind === 'structure') {
+        // 새 문서는 파일이 없어 다시 열 수 없으므로 닫은 탭 목록에 남기지 않는다 (FR-EDIT-06).
+        this.tabs.forgetClosed((p) => !isUntitledPath(p));
         this.tabbar?.render();
         this.updateWatch();
         this.dropUnusedDocs();
       }
       if (kind === 'active') {
+        const prev = this.lastActiveDoc;
+        if (prev && prev !== this.tabs.active()?.docId) this.edit.onLeave(prev);
         this.tabbar?.render();
         if (this.started) this.showActive();
       }
       if (this.started) this.saveSession.trigger();
     });
 
-    this.docs.subscribe((doc) => {
+    this.docs.subscribe((doc, kind) => {
       const tab = this.tabs.active();
-      if (tab?.docId === doc.id) this.scheduleRefresh();
+      // 디스크에서 읽은 본문만 화면 전체를 다시 맞춘다. 편집기에서 고친 본문은 편집 조정자가 미리보기만 고친다 (SDD 7.7).
+      if (kind === 'content' && tab?.docId === doc.id) this.scheduleRefresh();
+      if (kind === 'flags' && tab?.docId === doc.id && this.started && !this.retired) {
+        this.statusbar.render(doc, tab.mode, this.settings.zoom);
+        document.title = this.titleOf(doc);
+      }
       this.tabbar?.render();
     });
 
     this.systemDark.addEventListener('change', () => this.applyTheme());
 
-    this.bridge.on('file.changed', (p: { path: string }) => void this.reloadPath(p.path));
+    this.bridge.on('file.changed', (p: { path: string }) => void this.edit.onFileChanged(p.path));
     this.bridge.on('file.deleted', (p: { path: string }) => {
       this.docs.markDeleted(p.path);
     });
@@ -366,11 +406,17 @@ export class App {
     };
     // Windows 앱: 앱을 다시 실행해 넘긴 위치를 이 창에서 열고, 창을 닫기 전에 저장한 뒤 닫아도 된다고 알린다.
     this.bridge.on('open.paths', (p: { paths?: PathEntry[] }) => void this.openEntries(p.paths ?? []));
-    this.bridge.on('app.closing', () => {
-      flush();
-      void this.bridge.request('app.quit').catch(() => {});
-    });
+    // 저장하지 않은 문서가 있으면 저장할지 묻고 닫는다 (FR-EDIT-08).
+    this.bridge.on('app.closing', () => void this.edit.onAppClosing(flush, (d) => this.focusDoc(d)));
     window.addEventListener('pagehide', flush);
+    // 브라우저 탭을 닫거나 새로 고칠 때는 비동기 저장을 끝낼 수 없으므로 브라우저 확인 창으로 막는다 (FR-EDIT-08).
+    window.addEventListener('beforeunload', (e) => {
+      if (this.retired || this.edit.quitting) return;
+      this.edit.flush();
+      if (!this.edit.hasDirty()) return;
+      e.preventDefault();
+      e.returnValue = '';
+    });
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'hidden') flush();
       else if (!this.retired) this.claimSession();
@@ -453,17 +499,27 @@ export class App {
     });
   }
 
-  closeTab(id: number) {
+  /** 탭을 닫는다. 고친 문서면 저장할지 먼저 묻는다 (FR-EDIT-08). 닫았으면 true. */
+  async closeTab(id: number): Promise<boolean> {
+    const tab = this.tabs.get(id);
+    if (!tab) return false;
+    if (!(await this.edit.confirmClose([tab.docId], (d) => this.focusDoc(d)))) return false;
     this.tabs.close(id);
+    return true;
   }
 
+  /** 문서의 탭을 앞으로 가져온다(닫기 확인이 어느 문서를 묻는지 보이게). */
+  private focusDoc(docId: string) {
+    const t = this.tabs.byDoc(docId);
+    if (t) this.tabs.activate(t.id);
+  }
+
+  /** 탭이 없는 문서·렌더링·편집 상태를 버린다. */
   private dropUnusedDocs() {
     const used = new Set(this.tabs.tabs.map((t) => t.docId));
     for (const id of [...this.renderCache.keys()]) if (!used.has(id)) this.renderCache.delete(id);
-    for (const t of this.tabs.closed) {
-      const id = docKey(t.path);
-      if (!used.has(id)) this.docs.remove(id);
-    }
+    for (const d of this.docs.all()) if (!used.has(d.id)) this.docs.remove(d.id);
+    this.source?.prune(used);
   }
 
   private async reloadPath(path: string) {
@@ -479,7 +535,8 @@ export class App {
 
   private async reopenWithEncoding(enc: Encoding) {
     const doc = this.activeDoc();
-    if (!doc) return;
+    if (!doc || doc.untitled) return;
+    if (!(await this.edit.confirmDiscard(doc.id))) return;
     this.docs.update(doc.id, { forcedEncoding: enc });
     this.docs.upsert(await this.readDoc(doc.path, enc));
   }
@@ -495,7 +552,7 @@ export class App {
   private updateWatch() {
     if (this.watchTimer) clearTimeout(this.watchTimer);
     this.watchTimer = setTimeout(() => {
-      const paths = [...new Set(this.tabs.tabs.map((t) => t.path))];
+      const paths = [...new Set(this.tabs.tabs.map((t) => t.path).filter((p) => !isUntitledPath(p)))];
       void this.bridge.request('watch.set', { paths }).catch((err) => this.logError(String(err)));
     }, 50);
   }
@@ -533,8 +590,11 @@ export class App {
       this.workspace.setActive('');
       document.title = S.appName;
       this.findbar.refresh();
+      this.edit.updateBar();
+      this.lastActiveDoc = null;
       return;
     }
+    this.lastActiveDoc = doc.id;
     this.emptyEl.hidden = true;
     this.viewsEl.hidden = false;
     this.viewsEl.dataset.mode = tab.mode;
@@ -549,9 +609,8 @@ export class App {
           });
         return;
       }
-      if (this.source.docId !== doc.id || this.source.docVersion !== doc.version) {
-        this.source.setText(doc.id, doc.version, doc.binary ? '' : doc.text);
-      }
+      // 문서마다 편집 상태를 갈아 끼운다. 바이너리 문서는 읽기 전용이다 (FR-EDIT-01).
+      this.source.show(doc.id, doc.version, doc.binary ? '' : doc.text, !doc.binary);
     }
     const r = this.getRendered(doc);
     this.headings = r.headings;
@@ -559,7 +618,8 @@ export class App {
     this.toc.setHeadings(this.headings);
     this.statusbar.render(doc, tab.mode, this.settings.zoom);
     this.workspace.setActive(doc.path);
-    document.title = S.windowTitle(basename(doc.path));
+    document.title = this.titleOf(doc);
+    this.edit.updateBar();
     const line = tab.line;
     const fragment = this.pendingFragment?.docId === doc.id ? this.pendingFragment.fragment : null;
     this.pendingFragment = null;
@@ -572,11 +632,61 @@ export class App {
     this.findbar.refresh();
   }
 
+  /**
+   * 편집기 본문을 문서 모델에 반영한 뒤 (SDD 7.7-2). 편집기는 건드리지 않고(상태 교체·스크롤 맞추기 없음)
+   * 분할 보기의 미리보기와 목차·상태 표시줄만 고친다 (FR-EDIT-03). 원문 보기만 보일 때는 렌더링하지 않는다.
+   */
+  private onEdited(doc: DocModel) {
+    const tab = this.tabs.active();
+    if (!tab || tab.docId !== doc.id || this.retired) return;
+    this.statusbar.render(doc, tab.mode, this.settings.zoom);
+    document.title = this.titleOf(doc);
+    if (tab.mode !== 'source') {
+      const t0 = performance.now();
+      const r = this.getRendered(doc);
+      this.headings = r.headings;
+      this.sync.suspended = true;
+      this.showPreview(r);
+      this.preview.scrollToLine(tab.line);
+      requestAnimationFrame(() => requestAnimationFrame(() => (this.sync.suspended = false)));
+      this.edit.lastRenderMs = performance.now() - t0;
+    } else if (doc.kind === 'markdown') {
+      this.headings = scanHeadings(doc.text);
+    }
+    this.toc.setHeadings(this.headings);
+    this.toc.setCurrentLine(tab.line);
+    // 미리보기에서 찾던 중이면 새로 그린 본문에서 다시 찾는다. 원문에서 찾던(바꾸던) 중이면 편집기가 일치를 스스로 고친다.
+    if (this.findbar.isOpen && this.findTarget() === 'preview') this.findbar.refresh();
+  }
+
+  /** 다른 이름으로 저장해 문서가 새 위치로 옮겨졌다 (FR-EDIT-05): 탭·편집 상태·렌더링·감시·세션을 옮긴다. */
+  private onMoved(oldId: string, doc: DocModel) {
+    const tab = this.tabs.byDoc(oldId);
+    this.source?.rekey(oldId, doc.id, doc.version);
+    this.stashShown();
+    this.renderCache.delete(oldId);
+    if (tab) this.tabs.retarget(tab.id, doc.id, doc.path);
+    if (this.bridge.isRestorable(doc.path)) this.session.recentFiles = pushRecent(this.session.recentFiles, doc.path, MAX_RECENT_FILES);
+    this.saveSession.trigger();
+    if (tab && this.tabs.activeId === tab.id) this.showActive();
+  }
+
+  /** 창 제목. 저장하지 않은 문서면 앞에 표시를 단다 (FR-EDIT-02). */
+  private titleOf(doc: DocModel): string {
+    return (doc.dirty ? S.tab.dirtyMark : '') + S.windowTitle(basename(doc.path));
+  }
+
+  /** 화면에 보일 위치. 새 문서는 이름만 보인다. */
+  private displayPath(p: string): string {
+    return isUntitledPath(p) ? basename(p) : this.bridge.displayPath(p);
+  }
+
   /** 원문 보기 모듈을 불러와 붙인다. 여러 번 불러도 한 번만 만든다. */
   loadSource(): Promise<SourceView> {
     if (!this.sourceLoading) {
       this.sourceLoading = loadSourceBundle().then((SourceViewCtor) => {
         const view = new SourceViewCtor();
+        view.onChange = (id) => this.edit.onSourceChange(id);
         view.setWrap(this.settings.wordWrap);
         view.setDark(this.isDark());
         this.viewsEl.querySelector('.pane.source')!.append(view.el);
@@ -623,6 +733,8 @@ export class App {
     const tab = this.tabs.active();
     const doc = this.activeDoc();
     if (!tab || !doc) return;
+    // 폴더 기준 위치로 다시 열면 디스크에서 읽으므로 고친 내용은 먼저 저장하거나 버린다 (FR-EDIT-08).
+    if (!(await this.edit.confirmClose([doc.id]))) return;
     const r = await this.bridge.request<{ path: string | null }>('dialog.openFolder');
     if (!r.path) return;
     this.setWorkspace(r.path, true);
@@ -633,7 +745,7 @@ export class App {
     }
     const { mode, line } = tab;
     await this.openFile(moved.path, { mode, line });
-    this.closeTab(tab.id);
+    this.tabs.close(tab.id);
   }
 
   /** 보이던 문서 노드를 캐시로 되돌린다 (복제하지 않고 옮긴다). */
@@ -688,7 +800,7 @@ export class App {
         this.loadImages(r.frag);
         r.hasDiagrams = !!r.frag.querySelector(`.${DIAGRAM_CLASS}`);
         if (r.hasDiagrams) this.diagrams.applyCached(r.frag);
-        r.needsFolder = !this.bridge.canResolveRelative(doc.path) && !!r.frag.querySelector('img[data-mdv-src], a[data-mdv-path]');
+        r.needsFolder = !doc.untitled && !this.bridge.canResolveRelative(doc.path) && !!r.frag.querySelector('img[data-mdv-src], a[data-mdv-path]');
       } catch (err) {
         // FR-REN-04: 블록 하나의 실패는 renderMarkdown이 그 블록만 바꾼다. 여기는 파싱·정제 자체가 실패했을 때다.
         this.logError(S.log.renderFailed(doc.path, (err as Error).message));
@@ -792,6 +904,15 @@ export class App {
     if (!target) return { count: 0, index: -1 };
     if (target === 'source') return this.source ? this.source.step(dir) : { count: 0, index: -1 };
     return this.preview.step(dir);
+  }
+
+  /** 찾아 바꾸기 (FR-EDIT-07). 원문(편집기)에서만 바꾼다. */
+  private runReplace(q: FindQuery, replacement: string, all: boolean): FindStatus {
+    const tab = this.tabs.active();
+    if (!tab || tab.mode === 'preview' || !this.source) return { count: 0, index: -1 };
+    this.tabs.setFindTarget(tab.id, 'source');
+    this.preview.clearFind();
+    return this.source.replace(q, replacement, all);
   }
 
   private findPrefill(): string {
@@ -957,7 +1078,7 @@ export class App {
 
   /** 저장할 세션. 다음에 다시 열 수 없는 위치(핸들 없는 파일 등)는 탭·최근 목록에서 뺀다. */
   private sessionData(): SessionData {
-    const keep = (p: string) => this.bridge.isRestorable(p);
+    const keep = (p: string) => !isUntitledPath(p) && this.bridge.isRestorable(p);
     const tabs = this.tabs.tabs.filter((t) => keep(t.path));
     const live = tabs.map((t) => ({ path: t.path, mode: t.mode, line: Math.round(t.line * 100) / 100 }));
     // 독립 모드: 권한을 다시 받지 못해 아직 못 연 지난 세션의 탭은 "이전 문서 다시 열기"를 누를 때까지 남겨 둔다.
@@ -1013,11 +1134,14 @@ export class App {
   private setMode(mode: ViewMode) {
     const tab = this.tabs.active();
     if (!tab || tab.mode === mode) return;
+    // 기다리는 편집을 먼저 반영해 미리보기가 고친 본문으로 그려지게 한다 (FR-EDIT-03).
+    this.edit.flush();
     this.tabs.setMode(tab.id, mode);
     this.showActive();
   }
 
   private print() {
+    this.edit.flush();
     const tab = this.tabs.active();
     const doc = this.activeDoc();
     if (!tab || !doc) return;
@@ -1070,13 +1194,22 @@ export class App {
       id: 'file.reload', title: S.cmd.fileReload, keys: ['F5'], enabled: hasTab,
       run: async () => {
         const doc = this.activeDoc();
-        if (doc) await this.reloadPath(doc.path);
+        if (!doc || doc.untitled) return;
+        // 고친 문서는 버리고 다시 읽을지 먼저 묻는다 (FR-WATCH-03, FR-EDIT-09).
+        if (!(await this.edit.confirmDiscard(doc.id))) return;
+        await this.reloadPath(doc.path);
       },
     });
     c.register({ id: 'file.closeTab', title: S.cmd.fileCloseTab, keys: ['Alt+W'], enabled: hasTab, run: () => this.closeTab(this.tabs.activeId!) });
     c.register({
       id: 'file.closeOthers', title: S.cmd.fileCloseOthers, enabled: () => this.tabs.tabs.length > 1,
-      run: () => this.tabs.closeOthers(this.tabs.activeId!),
+      run: async () => {
+        const keep = this.tabs.activeId!;
+        const others = this.tabs.tabs.filter((t) => t.id !== keep).map((t) => t.docId);
+        if (!(await this.edit.confirmClose(others, (d) => this.focusDoc(d)))) return;
+        this.tabs.activate(keep);
+        this.tabs.closeOthers(keep);
+      },
     });
     c.register({
       id: 'file.reopenClosed', title: S.cmd.fileReopenClosed, keys: ['Alt+Shift+T'], enabled: () => this.tabs.closed.length > 0,
@@ -1085,7 +1218,10 @@ export class App {
         if (t) await this.openFile(t.path, { mode: t.mode, line: t.line });
       },
     });
-    c.register({ id: 'file.copyPath', title: S.cmd.fileCopyPath, enabled: hasTab, run: () => this.copyText(this.bridge.displayPath(this.activeDoc()!.path)) });
+    c.register({
+      id: 'file.copyPath', title: S.cmd.fileCopyPath, enabled: () => hasTab() && !this.activeDoc()?.untitled,
+      run: () => this.copyText(this.bridge.displayPath(this.activeDoc()!.path)),
+    });
     c.register({
       id: 'file.reveal', title: S.cmd.fileReveal, enabled: () => hasTab() && this.canReveal(this.activeDoc()!.path),
       run: () => this.bridge.request('shell.reveal', { path: this.activeDoc()!.path }),
@@ -1101,6 +1237,57 @@ export class App {
       },
     });
     c.register({ id: 'file.restoreSession', title: S.cmd.fileRestoreSession, enabled: () => this.restorable > 0, run: () => this.restoreSession() });
+
+    // 편집과 저장 (FR-EDIT-01~10, SRS 4.2). Ctrl+N은 브라우저가 넘기지 않고 Alt+N은 인코딩 메뉴라 새 문서는 Alt+Shift+N이다.
+    const editable = () => {
+      const tab = this.tabs.active();
+      return !!tab && tab.mode !== 'preview' && !this.activeDoc()?.binary;
+    };
+    c.register({
+      id: 'file.new', title: S.cmd.fileNew, keys: ['Alt+Shift+N'],
+      run: async () => {
+        const doc = this.edit.newDocument();
+        this.tabs.open(doc.id, doc.path, { mode: 'source' }, true);
+        await this.loadSource();
+        requestAnimationFrame(() => this.source?.focus());
+      },
+    });
+    c.register({ id: 'file.save', title: S.cmd.fileSave, keys: ['Ctrl+S'], enabled: hasTab, run: () => this.edit.save(this.tabs.active()!.docId) });
+    c.register({
+      id: 'file.saveAs', title: S.cmd.fileSaveAs, keys: ['Ctrl+Shift+S'], enabled: () => hasTab() && !this.activeDoc()?.binary,
+      run: () => this.edit.save(this.tabs.active()!.docId, { as: true }),
+    });
+    // 실행 취소·다시 실행 키는 편집기(와 입력 칸)가 직접 받는다. 메뉴에는 키를 보이기만 한다 (SDD 6.3).
+    c.register({
+      id: 'edit.undo', title: S.cmd.editUndo, keyHint: ['Ctrl+Z'], enabled: editable,
+      run: () => {
+        this.source?.undo();
+        this.source?.focus();
+      },
+    });
+    c.register({
+      id: 'edit.redo', title: S.cmd.editRedo, keyHint: ['Ctrl+Y', 'Ctrl+Shift+Z'], enabled: editable,
+      run: () => {
+        this.source?.redo();
+        this.source?.focus();
+      },
+    });
+    c.register({
+      id: 'edit.replace', title: S.cmd.editReplace, keys: ['Ctrl+H'], enabled: editable,
+      run: () => {
+        const tab = this.tabs.active()!;
+        this.tabs.setFindTarget(tab.id, 'source');
+        this.findbar.open(this.source?.selectionText() ?? '', true);
+      },
+    });
+    c.register({
+      id: 'settings.autoSave', title: S.cmd.autoSave, checked: () => this.settings.autoSave,
+      run: () => {
+        this.settings.autoSave = !this.settings.autoSave;
+        if (this.settings.autoSave) this.edit.resetAuto();
+        this.saveSettings.trigger();
+      },
+    });
 
     c.register({ id: 'view.preview', title: S.mode.preview, keys: ['Ctrl+1'], enabled: hasTab, checked: modeIs('preview'), run: () => this.setMode('preview') });
     c.register({ id: 'view.source', title: S.mode.source, keys: ['Ctrl+2'], enabled: hasTab, checked: modeIs('source'), run: () => this.setMode('source') });
@@ -1175,7 +1362,7 @@ export class App {
     c.register({ id: 'tab.next', title: S.cmd.tabNext, keys: ['Alt+PageDown'], enabled: () => this.tabs.tabs.length > 1, run: () => this.tabs.cycle(1) });
     c.register({ id: 'tab.prev', title: S.cmd.tabPrev, keys: ['Alt+PageUp'], enabled: () => this.tabs.tabs.length > 1, run: () => this.tabs.cycle(-1) });
 
-    c.register({ id: 'find.open', title: S.cmd.findOpen, keys: ['Ctrl+F'], enabled: hasTab, run: () => this.findbar.open(this.findPrefill()) });
+    c.register({ id: 'find.open', title: S.cmd.findOpen, keys: ['Ctrl+F'], enabled: hasTab, run: () => this.findbar.open(this.findPrefill(), false) });
     c.register({ id: 'find.next', title: S.cmd.findNext, keys: ['F3'], enabled: hasTab, run: () => this.findbar.step(1) });
     c.register({ id: 'find.prev', title: S.cmd.findPrev, keys: ['Shift+F3'], enabled: hasTab, run: () => this.findbar.step(-1) });
 
@@ -1204,13 +1391,18 @@ export class App {
       {
         label: S.menu.file, key: 'F',
         items: () => [
-          { cmd: 'file.open' }, { cmd: 'file.openFolder' }, { cmd: 'file.restoreSession' },
+          { cmd: 'file.new' }, { cmd: 'file.open' }, { cmd: 'file.openFolder' }, { cmd: 'file.restoreSession' },
           { label: S.menu.recentFiles, sub: recentFiles }, { label: S.menu.recentFolders, sub: recentFolders }, { cmd: 'file.clearRecent' },
+          { sep: true }, { cmd: 'file.save' }, { cmd: 'file.saveAs' },
           { sep: true }, { cmd: 'file.reload' },
           { sep: true }, { cmd: 'file.closeTab' }, { cmd: 'file.closeOthers' }, { cmd: 'file.reopenClosed' },
           { sep: true }, { cmd: 'file.copyPath' }, { cmd: 'file.reveal' },
           { sep: true }, { cmd: 'file.print' },
         ],
+      },
+      {
+        label: S.menu.edit, key: 'E',
+        items: () => [{ cmd: 'edit.undo' }, { cmd: 'edit.redo' }, { sep: true }, { cmd: 'edit.replace' }],
       },
       {
         label: S.menu.view, key: 'V',
@@ -1242,6 +1434,7 @@ export class App {
       {
         label: S.menu.settings, key: 'T',
         items: () => [
+          { cmd: 'settings.autoSave' },
           { cmd: 'view.remoteImages' },
           ...(this.bridge.mode === 'standalone' ? [{ cmd: 'view.rememberHandles' }] : []),
           ...(this.bridge.mode === 'desktop' ? [{ cmd: 'app.openWith' }] : []),
@@ -1259,11 +1452,12 @@ export class App {
     const table = document.createElement('table');
     table.className = 'shortcut-table';
     for (const cmd of this.cmds.all()) {
-      if (!cmd.keys?.length || cmd.reserved) continue;
+      const keys = [...(cmd.keys ?? []), ...(cmd.keyHint ?? [])];
+      if (!keys.length || cmd.reserved) continue;
       const tr = document.createElement('tr');
       tr.append(
         Object.assign(document.createElement('td'), { textContent: cmd.title.replace(/…$/, '') }),
-        Object.assign(document.createElement('td'), { textContent: cmd.keys.join(', ') }),
+        Object.assign(document.createElement('td'), { textContent: keys.join(', ') }),
       );
       table.append(tr);
     }

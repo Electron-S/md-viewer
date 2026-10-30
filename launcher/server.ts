@@ -25,6 +25,11 @@ const IMAGE_TYPES: Record<string, string> = {
   '.avif': 'image/avif',
 };
 const SVG_CSP = "default-src 'none'; style-src 'unsafe-inline'";
+/** 쓸 수 있는 문서 확장자 (NFR-SEC-05). 화면의 작업 공간 규칙(web/src/render/paths.ts)과 같은 목록이다. */
+const DOC_EXT = /\.(md|markdown|mdown|mkd|mkdn|mdwn|mdtxt|mdtext|txt)$/i;
+/** Windows에서 다른 프로세스(백신·인덱서)가 잠깐 잡은 파일을 바꿔 넣을 때 다시 시도하는 횟수와 간격 */
+const RENAME_RETRIES = 6;
+const RENAME_RETRY_MS = 50;
 /** setTimeout이 받는 최대 지연(약 24.8일). 넘기면 Node가 1 ms로 바꿔 실행기가 바로 끝난다. */
 const MAX_TIMER_MS = 2 ** 31 - 1;
 
@@ -234,6 +239,100 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
       req.on('error', reject);
     });
 
+  /** 쓰기 본문(파일 바이트). octet-stream만 받는다. JSON처럼 단순 요청이 아니어서 다른 출처의 페이지는 사전 요청에서 막힌다. */
+  const readRaw = (req: http.IncomingMessage, limit: number): Promise<Buffer> =>
+    new Promise((resolve, reject) => {
+      if (!/^application\/octet-stream\b/i.test(req.headers['content-type'] ?? '')) {
+        reject(new ApiError(400, 'EINVAL', L.err.badRequest));
+        req.resume();
+        return;
+      }
+      const chunks: Buffer[] = [];
+      let size = 0;
+      let failed = false;
+      req.on('data', (c: Buffer) => {
+        size += c.length;
+        if (size > limit && !failed) {
+          failed = true;
+          reject(new ApiError(413, 'ETOOBIG', L.err.tooBig));
+        }
+        if (!failed) chunks.push(c);
+      });
+      req.on('end', () => {
+        if (!failed) resolve(Buffer.concat(chunks));
+      });
+      req.on('error', reject);
+    });
+
+  /**
+   * 문서를 원자적으로 쓴다 (FR-EDIT-04, NFR-SEC-05). 같은 폴더의 임시 파일에 쓰고 fsync한 뒤 이름을 바꾼다.
+   * 원래 파일 권한을 지키고, 쓰다 실패하면 임시 파일을 지워 원본만 남긴다.
+   */
+  const writeDoc = async (
+    real: string,
+    body: Buffer,
+    o: { baseMtime: number | null; baseSize: number | null; create: boolean; overwrite: boolean },
+  ): Promise<{ mtime: number; size: number }> => {
+    let st: fs.Stats | null = null;
+    try {
+      st = fs.statSync(real);
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT') throw fsError(e);
+    }
+    if (st?.isDirectory()) throw new ApiError(409, 'EISDIR', L.err.isDir);
+    if (st && !st.isFile()) throw new ApiError(400, 'EINVAL', L.err.badRequest);
+    if (!st && !o.create) throw new ApiError(404, 'ENOENT', L.err.noFile);
+    if (st && o.create && !o.overwrite) throw new ApiError(409, 'EEXIST', L.err.exists);
+    // 읽은 뒤 다른 프로그램이 바꿨으면 덮어쓰지 않는다. 화면이 사용자에게 묻고 base 없이 다시 보낸다 (FR-EDIT-09).
+    if (st && o.baseMtime !== null && (Math.round(st.mtimeMs) !== o.baseMtime || (o.baseSize !== null && st.size !== o.baseSize))) {
+      throw new ApiError(409, 'ECONFLICT', L.err.conflict);
+    }
+    const tmp = path.join(path.dirname(real), `.${path.basename(real)}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`);
+    let fd: number | null = null;
+    try {
+      fd = fs.openSync(tmp, 'wx', st ? st.mode & 0o777 : 0o666);
+      fs.writeFileSync(fd, body);
+      // open의 mode는 umask를 거치므로 원래 권한을 다시 맞춘다. 권한을 못 바꾸는 파일 시스템(drvfs 등)은 그대로 둔다.
+      if (st && !win) {
+        try {
+          fs.fchmodSync(fd, st.mode & 0o7777);
+        } catch {
+          // 위와 같다.
+        }
+      }
+      fs.fsyncSync(fd);
+      fs.closeSync(fd);
+      fd = null;
+      for (let i = 0; ; i++) {
+        try {
+          fs.renameSync(tmp, real);
+          break;
+        } catch (e) {
+          const code = (e as NodeJS.ErrnoException).code;
+          if (!win || i >= RENAME_RETRIES || (code !== 'EPERM' && code !== 'EBUSY' && code !== 'EACCES')) throw e;
+          await new Promise((r) => setTimeout(r, RENAME_RETRY_MS));
+        }
+      }
+    } catch (e) {
+      if (fd !== null) {
+        try {
+          fs.closeSync(fd);
+        } catch {
+          // 이미 닫혔다.
+        }
+      }
+      try {
+        fs.unlinkSync(tmp);
+      } catch {
+        // 만들지 못했거나 이미 옮겼다.
+      }
+      throw e instanceof ApiError ? e : fsError(e);
+    }
+    const after = fs.statSync(real);
+    return { mtime: Math.round(after.mtimeMs), size: after.size };
+  };
+
   const tokenOk = (t: string | null) => {
     if (!t) return false;
     const b = Buffer.from(t);
@@ -332,6 +431,26 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
         const headers: http.OutgoingHttpHeaders = { 'content-type': type };
         if (type === 'image/svg+xml') headers['content-security-policy'] = SVG_CSP;
         return send(res, 200, body, headers);
+      }
+      case 'POST /api/write': {
+        // 쓰기는 뷰어 페이지가 보낸 요청만 받는다. 브라우저는 POST에 Origin을 붙이므로 토큰에 더해 출처까지 맞춰 본다 (NFR-SEC-02).
+        if (req.headers.origin !== `http://127.0.0.1:${port}`) {
+          req.resume();
+          throw new ApiError(403, 'EFORBIDDEN', L.err.forbidden);
+        }
+        const raw = q('path') ?? '';
+        const real = allowed(raw);
+        if (!DOC_EXT.test(raw) || !DOC_EXT.test(real)) {
+          req.resume();
+          throw new ApiError(403, 'EACCES', L.err.notDocument);
+        }
+        const num = (k: string) => {
+          const v = q(k);
+          return v === null || v === '' || !Number.isFinite(Number(v)) ? null : Number(v);
+        };
+        const body = await readRaw(req, maxBytes);
+        const r = await writeDoc(real, body, { baseMtime: num('baseMtime'), baseSize: num('baseSize'), create: q('create') === '1', overwrite: q('overwrite') === '1' });
+        return json(res, 200, r);
       }
       case 'GET /api/events': {
         const client = (q('client') ?? '').slice(0, 100) || crypto.randomBytes(8).toString('hex');

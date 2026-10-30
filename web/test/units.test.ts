@@ -213,7 +213,7 @@ test('탭 바: 세로(열린 파일 목록)로 두면 위아래 위치로 끌어
 test('문서 모델: 다시 읽으면 버전 증가, 수동 인코딩 유지, 개수 계산 (ARCH-01)', () => {
   const store = new DocStore();
   const h: HostDoc = {
-    path: 'C:\\x.md', text: '가나 다\r\nb\rc\n', encoding: 'cp949', hasBom: false, eol: 'Mixed', size: 10,
+    path: 'C:\\x.md', text: '가나 다\r\nb\rc\n', encoding: 'cp949', hasBom: false, eol: 'Mixed', eolCounts: { crlf: 1, lf: 1, cr: 1 }, size: 10,
     mtime: 0, decodeWarning: false, kind: 'markdown', binary: false,
   };
   const d1 = store.upsert(h);
