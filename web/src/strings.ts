@@ -45,6 +45,10 @@ const ko = {
     rememberHandles: '연 파일·폴더 접근 권한 기억 (독립 모드)',
     openWith: '탐색기 연결 프로그램 목록에 MD Viewer 등록',
     reserved: '다음 버전에서 지원할 기능',
+    gotoLine: '줄로 이동…',
+    nextChange: '다음 바뀐 곳',
+    prevChange: '이전 바뀐 곳',
+    copyLocation: '위치 복사 (Claude에 붙여 넣기)',
     viewWordWrap: '자동 줄 바꿈 (원문 보기)',
     viewZoomIn: '확대',
     viewZoomOut: '축소',
@@ -102,15 +106,34 @@ const ko = {
     hostInitFailed: (msg: string) => `뷰어를 시작하지 못했습니다: ${msg}`,
     cannotOpen: (name: string, msg: string) => `열 수 없습니다: ${name} — ${msg}`,
     copied: '복사했습니다',
+    copiedLocation: (loc: string) => `위치를 복사했습니다: ${loc}`,
     notInFolder: '고른 폴더에 이 문서가 없습니다. 문서가 든 폴더를 고르세요.',
     restoreNone: '다시 열 수 있는 문서가 없습니다.',
-    notYet: '이 단축키의 기능은 다음 버전에서 지원합니다.',
+    notYet: (name: string) => `${name}: 다음 버전에서 지원할 기능입니다.`,
     notViewable: (name: string) => `문서가 아닌 파일은 뷰어에서 열지 않습니다: ${name}`,
     openWithOn: '등록했습니다. 탐색기에서 .md 파일을 오른쪽 클릭 → 연결 프로그램에서 MD Viewer를 고르세요.',
     openWithOff: '연결 프로그램 목록에서 뺐습니다.',
   },
 
+  /** 아직 없는 기능의 이름. 그 단축키를 누르면 알린다 (SRS 4.2). */
+  later: {
+    back: '뒤로 가기',
+    forward: '앞으로 가기',
+    quickOpen: '빠른 열기',
+    findInFolder: '폴더에서 찾기',
+  },
+
+  /** 줄로 이동 (FR-NAV-05) */
+  gotoLine: {
+    title: '줄로 이동',
+    label: (total: number) => `줄 번호 (1~${total})`,
+    invalid: (v: string) => `줄 번호가 아닙니다: ${v}`,
+  },
+
   preview: {
+    /** 코드 블록 복사 버튼 (FR-REN-09) */
+    copyCode: '복사',
+    copyCodeTitle: '코드 복사',
     binary: '바이너리 파일이라 내용을 표시하지 않습니다.',
     largeFile: (size: string) => `큰 파일(${size})이라 미리보기를 자동으로 그리지 않았습니다.`,
     renderLarge: '미리보기 그리기',
@@ -210,6 +233,9 @@ const ko = {
     deleted: '디스크에서 삭제됨',
     offline: '⚠ 실행기 연결 끊김',
     modified: '수정됨',
+    /** 밖에서 바뀐 곳 (FR-WATCH-05). index는 옮겨 간 바뀐 곳(0부터) */
+    changes: (n: number, index: number | null) => (index == null ? `바뀐 곳 ${n}` : `바뀐 곳 ${index + 1}/${n}`),
+    changesTitle: '밖에서 바뀐 곳. 누르면 다음 바뀐 곳으로 갑니다 (Alt+F5, 이전은 Shift+Alt+F5)',
   },
 
   tab: {

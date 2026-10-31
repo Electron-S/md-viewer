@@ -1,8 +1,8 @@
 # MD Viewer
 
-설치 없이 쓰는 Markdown 뷰어이자 편집기입니다. HTML 파일 하나(`viewer.html`)를 브라우저로 열어 쓰거나, Windows 앱(`MDViewer.exe`)으로 탐색기에서 문서를 바로 열거나, Claude Code에서 "이 문서 열어줘"라고 하면 스킬이 브라우저에 띄워 줍니다. 여러 문서를 위쪽 탭이나 왼쪽 목록으로 열어 두고, 미리보기·원문·분할 보기를 오가며 읽고, 오른쪽 목차와 왼쪽 작업 공간 트리로 이동합니다. 원문·분할 보기에서는 바로 고쳐 원래 인코딩 그대로 저장합니다(v2.0). ```` ```mermaid ```` 블록은 다이어그램으로 그려 보여 줍니다.
+설치 없이 쓰는 Markdown 뷰어이자 편집기입니다. HTML 파일 하나(`viewer.html`)를 브라우저로 열어 쓰거나, Windows 앱(`MDViewer.exe`)으로 탐색기에서 문서를 바로 열거나, Claude Code에서 "이 문서 열어줘"라고 하면 스킬이 브라우저에 띄워 줍니다. 여러 문서를 위쪽 탭이나 왼쪽 목록으로 열어 두고, 미리보기·원문·분할 보기를 오가며 읽고, 오른쪽 목차와 왼쪽 작업 공간 트리로 이동합니다. 원문·분할 보기에서는 바로 고쳐 원래 인코딩 그대로 저장합니다(v2.0). ```` ```mermaid ```` 블록은 다이어그램으로 그려 보여 줍니다. Claude Code로 만든 보고서를 읽고 고치는 흐름에 맞춰, 고친 곳으로 바로 열고, 밖에서 바뀐 곳을 표시하고, 고칠 곳의 위치를 복사해 대화에 붙여 넣습니다(v2.1).
 
-- 버전: v2.0.1 ([릴리스 노트](RELEASE_NOTES.md))
+- 버전: v2.1.0 ([릴리스 노트](RELEASE_NOTES.md))
 - 뷰어: Edge·Chrome 최근 버전(모든 기능), Firefox·Safari 최신판(열기·렌더링·찾기·보기 모드)
 - Windows 앱: Windows 10/11 x64. WebView2 런타임과 .NET Framework 4.8이 필요하며 둘 다 Windows에 기본으로 들어 있습니다.
 - 실행기·스킬: Node.js 18 이상(Windows 10/11, WSL2, macOS, Linux)
@@ -51,6 +51,8 @@ node mdview/mdview.mjs --install-skill
 
 ```bash
 mdview README.md docs/        # 파일은 탭으로, 폴더는 작업 공간으로
+mdview "report.md#3.2 결과"   # 그 제목 위치에 연다(GitHub식 id #32-결과도 됨)
+mdview report.md:120          # 120번째 줄 위치에 연다(report.md#L120도 같음)
 mdview --root . report.md     # 문서가 따라갈 수 있는 폴더를 지정(기본: git 저장소 루트)
 mdview --no-open README.md    # 브라우저를 열지 않고 주소만 출력
 mdview --status | --stop
@@ -60,6 +62,18 @@ mdview --status | --stop
 - 이미 떠 있으면 그 서버를 다시 쓰고, 열린 뷰어 탭이 없는 채로 10분이 지나면 스스로 끝납니다.
 - 밖에서 파일을 고치면 0.5초 안에 다시 그립니다. 브라우저 탭을 닫거나 새로 고쳐도 탭·보기 모드·스크롤 위치를 복원합니다.
 - WSL에서 실행하면 Windows 기본 브라우저로 엽니다. `C:\…`나 `\\wsl.localhost\…` 같은 Windows 경로도 받습니다.
+- 이미 열린 문서를 다시 열어도 읽던 위치와 보기 모드가 이어집니다. 위치를 붙이면(`#제목`, `:줄`) 그 위치로 갑니다. 그 이름의 파일이 실제로 있으면 위치로 보지 않습니다.
+
+### Claude Code 보고서 읽고 고치기 (v2.1)
+
+Claude가 만든 보고서를 뷰어로 읽고, 고칠 곳을 알려 주고, Claude가 고친 결과를 다시 확인하는 흐름을 돕습니다. 세 쓰는 방법 모두 같습니다(위치 붙여 열기는 실행기만).
+
+- **바뀐 곳 표시**: 열린 문서가 밖에서(Claude 등) 바뀌어 다시 읽으면 바뀐 블록 왼쪽에 막대를, 줄만 지운 자리에 작은 삼각형을 답니다. 원문 보기는 바뀐 줄 옆에 표시합니다. 상태 표시줄의 "바뀐 곳 n"을 누르거나 **Alt+F5**(이전은 **Shift+Alt+F5**)로 옮겨 다닙니다. 고치기 시작하거나 다시 읽으면 표시가 바뀝니다.
+- **위치 복사(Ctrl+Alt+C, 편집 메뉴)**: 고른 부분을 `경로:시작줄-끝줄` 한 줄과 `> ` 인용으로 복사합니다. Claude Code 대화에 붙여 넣고 "여기 고쳐 줘"라고 하면 됩니다. 미리보기에서 고른 부분은 그 블록의 원문 줄로 바꾸고, 고른 것이 없으면 지금 줄을 씁니다. 경로는 실행기·Windows 앱에서 절대 경로, 독립 모드에서 열린 폴더 기준 이름입니다.
+- **줄로 이동(Ctrl+G, 이동 메뉴)**: 줄 번호(1부터)로 갑니다. 원문 보기에서는 커서도 옮깁니다.
+- **코드 복사**: 코드 블록에 마우스를 올리면 언어 이름과 "복사" 단추가 보입니다.
+- **작업 공간 다시 읽기**: 뷰어 창으로 돌아오면 펼친 폴더를 다시 읽어 새로 생긴 파일을 보입니다. ↻도 펼친 폴더를 그대로 둡니다.
+- 문서 링크를 가운데 클릭하면 지금 탭에 머문 채 새 탭으로 엽니다. 인쇄(Ctrl+P)는 화면 테마와 관계없이 밝은 색으로 하고, 긴 코드 줄은 접습니다.
 
 ### 편집과 저장 (v2.0)
 
@@ -97,7 +111,7 @@ Markdown·텍스트 확장자(.md, .markdown, .txt 등) 파일에만 씁니다. 
 - 목차는 문서 오른쪽 패널에, 작업 공간 트리는 왼쪽 패널에 있습니다. 왼쪽 패널은 Ctrl+B, 목차 패널은 Ctrl+Alt+B로 숨기거나 보입니다. 패널 경계선을 끌어 너비를 바꿉니다.
 - 열린 파일은 위쪽 탭 줄이나 왼쪽 목록으로 보입니다. **보기 → 열린 파일 표시**에서 고릅니다. "왼쪽 목록"을 고르면 Notepad++의 문서 목록처럼 왼쪽 패널 위 칸에 한 줄에 하나씩 늘어서고, 아래 칸에는 작업 공간이 남습니다. 두 칸 사이 경계선을 끌어 높이를 바꿉니다.
 
-단축키 목록은 뷰어에서 F1. 브라우저가 가로채는 키(Ctrl+W, Ctrl+N, Ctrl+Tab 등)를 피해 탭 닫기는 Alt+W, 닫은 탭 다시 열기는 Alt+Shift+T, 다음·이전 탭은 Alt+PageDown/PageUp, 새 문서는 Alt+Shift+N입니다.
+단축키 목록은 뷰어에서 F1. 브라우저가 가로채는 키(Ctrl+W, Ctrl+N, Ctrl+Tab 등)를 피해 탭 닫기는 Alt+W, 닫은 탭 다시 열기는 Alt+Shift+T, 다음·이전 탭은 Alt+PageDown/PageUp, 새 문서는 Alt+Shift+N입니다. 줄로 이동은 Ctrl+G, 다음·이전 바뀐 곳은 Alt+F5/Shift+Alt+F5, 위치 복사는 Ctrl+Alt+C입니다.
 
 ## 구조
 
@@ -121,7 +135,7 @@ UI 문자열은 `web/src/strings.ts`, `launcher/strings.ts`, `host/Strings.cs` �
 ```bash
 npm ci
 node tools/build.mjs   # 타입 검사 → dist/viewer.html, dist/mdview/, dist/MDViewer.exe, dist/THIRD-PARTY-NOTICES.txt, 크기 검사, dist/md-viewer-<버전>.zip
-node tools/test.mjs    # 단위 테스트 135개(화면 89, 실행기 46. CommonMark 스펙 652개·GFM 확장 24개, XSS, 다이어그램 정제, 저장 인코딩 왕복, 쓰기 거부, 문자열 분리 등)
+node tools/test.mjs    # 단위 테스트 146개(화면 99, 실행기 47. CommonMark 스펙 652개·GFM 확장 24개, XSS, 다이어그램 정제, 저장 인코딩 왕복, 쓰기 거부, 바뀐 곳 줄 비교, 위치 복사·위치 인자, 문자열 분리 등)
                        # + Windows 앱 단위 테스트 12개(확인 67개, Windows·WSL에서만)
 ./tools/e2e.sh         # E2E (WSL + Windows Edge + MDViewer.exe. 준비는 tools/e2e.sh 머리말 참고)
 ```

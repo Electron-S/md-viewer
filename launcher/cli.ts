@@ -1,5 +1,5 @@
 // 실행기 명령 (SDD 7.3, FR-LAUNCH-01·05, FR-FILE-04).
-// mdview [--root 폴더] [--no-open] [--port 번호] [파일 또는 폴더 ...] | --status | --stop | --install-skill [폴더]
+// mdview [--root 폴더] [--no-open] [--port 번호] [파일(#제목·:줄) 또는 폴더 ...] | --status | --stop | --install-skill [폴더]
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
@@ -258,6 +258,23 @@ export async function ensureServer(io: CliIo, preferredPort?: number): Promise<{
   }
 }
 
+/**
+ * 위치를 붙인 인자(`문서.md:12`, `문서.md:12-20`, `문서.md#제목`, `문서.md#L12`)를 경로와 위치로 나눈다 (FR-LAUNCH-06).
+ * 줄은 1부터 센다. 위치 모양이 아니면 null. 그 이름의 파일이 실제로 있는지는 부른 쪽이 먼저 본다.
+ */
+export function splitLocation(arg: string): { path: string; line?: number; fragment?: string } | null {
+  // 마지막 `:` 뒤가 숫자일 때만 줄이다. 앞부분이 한 글자(`C:`처럼 드라이브만)면 경로가 아니다.
+  const m = /^(.*):(\d+)(?:-\d+)?$/.exec(arg);
+  if (m && m[1].length > 2) return { path: m[1], line: Number(m[2]) };
+  const hash = arg.lastIndexOf('#');
+  if (hash > 0 && hash < arg.length - 1) {
+    const frag = arg.slice(hash + 1);
+    const l = /^L(\d+)$/.exec(frag);
+    return l ? { path: arg.slice(0, hash), line: Number(l[1]) } : { path: arg.slice(0, hash), fragment: frag };
+  }
+  return null;
+}
+
 /** 인자로 받은 경로를 실행기가 읽을 수 있는 절대 경로로. WSL에서는 Windows 경로를 wslpath로 바꾼다. */
 export function resolveArg(arg: string, io: CliIo): string {
   const platform = io.platform ?? currentPlatform(io.env);
@@ -348,15 +365,16 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
     }
 
     const root = a.root ? resolveArg(a.root, io) : undefined;
-    const targets = a.paths.map((p) => {
+    const targets = a.paths.map((p): { path: string; isDir: boolean; line?: number; fragment?: string } => {
       const abs = resolveArg(p, io);
-      let isDir: boolean;
       try {
-        isDir = fs.statSync(abs).isDirectory();
+        return { path: abs, isDir: fs.statSync(abs).isDirectory() };
       } catch {
+        // 그 이름의 파일이 없으면 위치를 붙인 인자인지 본다 (FR-LAUNCH-06).
+        const loc = splitLocation(abs);
+        if (loc && fs.statSync(loc.path, { throwIfNoEntry: false })?.isFile()) return { ...loc, isDir: false };
         throw new CliError(L.notFound(abs));
       }
-      return { path: abs, isDir };
     });
     const server = await ensureServer(io, a.port);
     // WSL에서 새로 띄운 서버는 Windows 쪽 localhost 전달이 준비된 뒤에 주소를 낸다. 그 전에 열면 연결 거부 화면이 뜬다.
@@ -367,7 +385,12 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
     for (const r of roots) await apiCall(server.port, server.token, '/api/roots', { root: r }, (msg) => L.rootFailed(r, msg));
 
     const q = new URLSearchParams({ t: server.token });
-    for (const t of targets) q.append(t.isDir ? 'd' : 'f', t.path);
+    // 위치가 하나라도 있으면 파일마다 짝을 맞춘 at(빈 값, L줄, #조각)을 붙인다 (SDD 6.2).
+    const located = targets.some((t) => t.line != null || t.fragment);
+    for (const t of targets) {
+      q.append(t.isDir ? 'd' : 'f', t.path);
+      if (located && !t.isDir) q.append('at', t.line != null ? `L${t.line}` : t.fragment ? `#${t.fragment}` : '');
+    }
     const url = `http://127.0.0.1:${server.port}/?${q}`;
     const files = targets.filter((t) => !t.isDir).length;
     const dirs = targets.length - files;

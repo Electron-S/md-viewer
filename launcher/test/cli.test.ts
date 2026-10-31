@@ -5,7 +5,7 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import path from 'node:path';
 import { buildSync } from 'esbuild';
-import { cmdShim, ensureServer, findRoot, installShim, parseArgs, resolveArg, runCli, type CliIo } from '../cli';
+import { cmdShim, ensureServer, findRoot, installShim, parseArgs, resolveArg, runCli, splitLocation, type CliIo } from '../cli';
 import { Logger } from '../log';
 import { browserCommands, launch, revealCommand, splitCommand, waitWindowsReachable } from '../os';
 import { startServer } from '../server';
@@ -177,6 +177,37 @@ test('WSL에서 새로 띄운 서버는 Windows에서 닿을 때까지 기다린
   assert.match(calls[0].join(' '), /^curl\.exe .*http:\/\/127\.0\.0\.1:1234\/favicon\.ico$/);
   assert.equal(await waitWindowsReachable(1, 5000, async () => null), false, 'curl.exe가 없으면 잠깐 기다리고 넘어간다');
   assert.equal(await waitWindowsReachable(1, 200, async () => 7), false, '시간이 지나면 포기한다');
+});
+
+test('위치를 붙인 인자: #제목·:줄·#L줄을 나누고, 그 이름의 파일이 있으면 파일로 연다 (FR-LAUNCH-06)', async () => {
+  assert.deepEqual(splitLocation('/d/보고서.md:120'), { path: '/d/보고서.md', line: 120 });
+  assert.deepEqual(splitLocation('/d/보고서.md:120-134'), { path: '/d/보고서.md', line: 120 });
+  assert.deepEqual(splitLocation('/d/보고서.md#3.2 결과'), { path: '/d/보고서.md', fragment: '3.2 결과' });
+  assert.deepEqual(splitLocation('/d/보고서.md#L7'), { path: '/d/보고서.md', line: 7 });
+  assert.deepEqual(splitLocation('C:\\d\\a.md:12'), { path: 'C:\\d\\a.md', line: 12 });
+  assert.equal(splitLocation('C:12'), null, '드라이브 글자만 있는 것은 경로가 아니다');
+  assert.equal(splitLocation('/d/a.md'), null);
+  assert.equal(splitLocation('/d/a.md#'), null);
+
+  const home = tempDir();
+  homes.push(home);
+  const docs = tempDir('mdv-loc-');
+  fs.writeFileSync(path.join(docs, '보고서.md'), '# 보고서\n', 'utf8');
+  fs.writeFileSync(path.join(docs, '이름#표.md'), '# 이름에 #이 든 파일\n', 'utf8');
+  fs.writeFileSync(path.join(docs, 'b.md'), '# b\n', 'utf8');
+  const a = io(home, docs);
+  assert.equal(await runCli(['--no-open', '--port', '0', 'b.md', '보고서.md#3.2 결과', '보고서.md:120', '이름#표.md'], a), 0, a.errors.join('\n'));
+  const url = new URL(a.lines.at(-1)!);
+  const file = (n: string) => path.join(docs, n);
+  assert.deepEqual(url.searchParams.getAll('f'), [file('b.md'), file('보고서.md'), file('보고서.md'), file('이름#표.md')]);
+  assert.deepEqual(url.searchParams.getAll('at'), ['', '#3.2 결과', 'L120', ''], 'f와 같은 순서로 위치를 붙인다');
+
+  const b = io(home, docs);
+  assert.equal(await runCli(['--no-open', 'b.md'], b), 0);
+  assert.deepEqual(new URL(b.lines.at(-1)!).searchParams.getAll('at'), [], '위치가 없으면 at을 붙이지 않는다');
+  const c = io(home, docs);
+  assert.equal(await runCli(['--no-open', '없음.md#제목'], c), 1, '위치를 떼어도 없는 파일이면 오류');
+  assert.match(c.errors[0], /파일이나 폴더가 없습니다/);
 });
 
 test('없는 파일은 오류로 끝난다', async () => {

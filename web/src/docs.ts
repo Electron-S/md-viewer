@@ -1,4 +1,5 @@
 import type { HostDoc } from './bridge/types';
+import { diffLines, type LineRange } from './changes';
 import type { Encoding } from './encoding';
 import { docKey } from './render/paths';
 
@@ -20,6 +21,8 @@ export interface DocModel extends HostDoc {
   forcedEncoding?: Encoding;
   /** 큰 파일을 사용자가 미리보기로 그리기로 한 경우 (NFR-PERF-03) */
   forcePreview?: boolean;
+  /** 밖에서 바뀌어 다시 읽은 본문에서 바뀐 줄 범위 (FR-WATCH-05). 고치기 시작하면 지운다. 세션에는 남기지 않는다. */
+  changes?: LineRange[];
 }
 
 /** 구독 알림의 종류. content: 디스크에서 읽은 본문, edit: 편집기에서 고친 본문, flags: 수정됨·삭제 같은 표시만 (SDD 5.1) */
@@ -58,11 +61,13 @@ export class DocStore {
   /**
    * 새로 읽은 내용을 반영한다. 같은 문서면 버전만 올린다.
    * 고친 문서는 디스크 내용으로 덮지 않고 그대로 돌려준다. 사용자가 고친 내용을 버리기로 했을 때만 force로 덮는다 (FR-EDIT-09).
+   * track이면 밖에서 바뀌어 다시 읽은 것이므로 보이던 본문과 비교해 바뀐 곳을 남긴다 (FR-WATCH-05).
    */
-  upsert(h: HostDoc, force = false): DocModel {
+  upsert(h: HostDoc, force = false, track = false): DocModel {
     const id = docKey(h.path);
     const prev = this.docs.get(id);
     if (prev?.dirty && !force) return prev;
+    const changes = track && prev && !prev.untitled && !prev.binary && !h.binary ? diffLines(prev.text, h.text) : [];
     const doc: DocModel = {
       ...h,
       id,
@@ -73,6 +78,7 @@ export class DocStore {
       untitled: false,
       forcedEncoding: prev?.forcedEncoding,
       forcePreview: prev?.forcePreview,
+      changes: changes.length ? changes : undefined,
     };
     this.docs.set(id, doc);
     this.emit(doc, 'content');
@@ -104,7 +110,8 @@ export class DocStore {
       if (doc.dirty !== dirty) this.update(id, { dirty });
       return this.docs.get(id);
     }
-    const next: DocModel = { ...doc, text, version: ++this.seq, dirty };
+    // 고치기 시작하면 밖에서 바뀐 곳 표시는 지운다 (FR-WATCH-05).
+    const next: DocModel = { ...doc, text, version: ++this.seq, dirty, changes: undefined };
     this.docs.set(id, next);
     this.emit(next, 'edit');
     return next;

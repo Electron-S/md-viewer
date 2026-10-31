@@ -3,10 +3,11 @@ import markdownCss from '../../static/markdown.css';
 
 let sharedSheet: CSSStyleSheet | null = null;
 
+/** background: 가운데 클릭. 다른 문서는 지금 탭에 머문 채 새 탭으로 연다 (FR-NAV-03). */
 export type LinkAction =
   | { kind: 'fragment'; fragment: string }
   | { kind: 'external'; url: string }
-  | { kind: 'local'; path: string; fragment: string };
+  | { kind: 'local'; path: string; fragment: string; background?: boolean };
 
 interface LineAnchor {
   line: number;
@@ -55,6 +56,34 @@ export function chunkBlocks(frag: DocumentFragment): DocumentFragment {
   return out;
 }
 
+/**
+ * 코드 블록에 도구(언어 이름·복사 버튼)를 단다 (FR-REN-09). 정제가 끝난 노드에 화면이 직접 만든 요소만 넣는다.
+ * 글자는 data-label을 CSS로 보여, 찾기·선택 복사·인쇄에 섞이지 않게 한다. Mermaid·앞머리·원문 대체 블록(mdv-plain)은 뺀다.
+ */
+export function addCodeTools(root: ParentNode, label: { copy: string; copyTitle: string }) {
+  for (const code of Array.from(root.querySelectorAll('pre > code'))) {
+    const pre = code.parentElement!;
+    if (pre.classList.contains('mdv-plain') || pre.closest('.mdv-mermaid, .mdv-front-matter')) continue;
+    const tools = document.createElement('div');
+    tools.className = 'mdv-code-tools';
+    const lang = /(?:^|\s)language-(\S+)/.exec(code.getAttribute('class') ?? '')?.[1];
+    if (lang) {
+      const name = document.createElement('span');
+      name.className = 'mdv-code-lang';
+      name.setAttribute('data-label', lang);
+      tools.append(name);
+    }
+    const copy = document.createElement('button');
+    copy.type = 'button';
+    copy.className = 'mdv-code-copy';
+    copy.setAttribute('data-label', label.copy);
+    copy.title = label.copyTitle;
+    copy.setAttribute('aria-label', label.copyTitle);
+    tools.append(copy);
+    pre.append(tools);
+  }
+}
+
 /** 줄 번호와 위치가 함께 증가하는 것만 남긴다 (중첩 요소의 중복 제거). */
 function monotone<T extends LineAnchor>(list: T[]): T[] {
   list.sort((a, b) => a.line - b.line || a.top - b.top);
@@ -97,6 +126,8 @@ export class PreviewView {
   readonly article: HTMLElement;
   private noticeEl: HTMLElement;
   onLink: (action: LinkAction) => void = () => {};
+  /** 코드 블록의 복사 버튼을 눌렀다 (FR-REN-09). */
+  onCopyCode: (text: string) => void = () => {};
   private groups: Group[] | null = null;
   private marks: Element[] = [];
   private current = -1;
@@ -130,6 +161,16 @@ export class PreviewView {
     }
     this.root.append(this.article);
     this.root.addEventListener('click', (e) => this.onClick(e as MouseEvent));
+    // 가운데 클릭: 브라우저가 링크 주소(상대 경로)를 새 탭으로 열지 않게 막고 뷰어가 연다 (FR-NAV-03).
+    // 누를 때 막아야 자동 스크롤 표시도 뜨지 않는다.
+    this.root.addEventListener('mousedown', (e) => {
+      const me = e as MouseEvent;
+      if (me.button === 1 && (me.target as Element | null)?.closest?.('a')) me.preventDefault();
+    });
+    this.root.addEventListener('auxclick', (e) => {
+      const me = e as MouseEvent;
+      if (me.button === 1) this.onClick(me, true);
+    });
     new ResizeObserver(() => (this.groups = null)).observe(this.article);
     this.article.addEventListener('load', () => (this.groups = null), true);
     // 사용자가 직접 스크롤하면 위치 맞추기를 멈춘다.
@@ -229,15 +270,22 @@ export class PreviewView {
     return this.article.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
   }
 
-  private onClick(e: MouseEvent) {
-    const a = (e.target as Element | null)?.closest?.('a');
+  private onClick(e: MouseEvent, background = false) {
+    const target = e.target as Element | null;
+    const copy = target?.closest?.('.mdv-code-copy');
+    if (copy) {
+      e.preventDefault();
+      this.onCopyCode(copy.closest('pre')?.querySelector(':scope > code')?.textContent ?? '');
+      return;
+    }
+    const a = target?.closest?.('a');
     if (!a) return;
     e.preventDefault();
     const ext = a.getAttribute('data-mdv-ext');
     const path = a.getAttribute('data-mdv-path');
     const frag = a.getAttribute('data-mdv-frag') ?? '';
     if (ext) this.onLink({ kind: 'external', url: ext });
-    else if (path) this.onLink({ kind: 'local', path, fragment: frag });
+    else if (path) this.onLink({ kind: 'local', path, fragment: frag, background });
     else if (a.hasAttribute('data-mdv-frag')) this.onLink({ kind: 'fragment', fragment: frag });
   }
 

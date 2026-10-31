@@ -26,8 +26,10 @@ export class ServerBridge implements Bridge {
     params: URLSearchParams,
   ) {
     this.token = params.get('t') ?? '';
+    // at은 f와 같은 순서로 짝을 이루는 위치다: 빈 값, `L<줄>`(1부터), `#<조각>` (FR-LAUNCH-06, SDD 6.2).
+    const at = params.getAll('at');
     this.args = [
-      ...params.getAll('f').map((path) => ({ path, isDir: false })),
+      ...params.getAll('f').map((path, i) => ({ path, isDir: false, ...parseAt(at[i]) })),
       ...params.getAll('d').map((path) => ({ path, isDir: true })),
     ];
     // 다시 고칠 때 같은 인자로 탭이 또 열리지 않게 주소에는 토큰만 남긴다.
@@ -201,4 +203,13 @@ export class ServerBridge implements Bridge {
   canResolveRelative(path: string): boolean {
     return isLocal(path) ? this.local.canResolveRelative(path) : true;
   }
+}
+
+/** 뷰어 주소의 위치 인자. `L12`는 12번째 줄(0부터 11), `#제목`은 조각. 알 수 없으면 위치 없음 */
+export function parseAt(v: string | undefined): { line?: number; fragment?: string } {
+  if (!v) return {};
+  const m = /^L(\d+)$/.exec(v);
+  if (m) return { line: Math.max(0, Number(m[1]) - 1) };
+  if (v.startsWith('#') && v.length > 1) return { fragment: v.slice(1) };
+  return {};
 }

@@ -104,7 +104,8 @@ export class FindBar {
       this.timer = setTimeout(() => this.runQuery(), 150);
     });
     this.input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') {
+      // 한글 조합 중의 Enter는 조합만 끝낸다. 다음 일치로 넘어가지 않는다 (FR-FIND-01).
+      if (e.key === 'Enter' && !e.isComposing) {
         e.preventDefault();
         this.step(e.shiftKey ? -1 : 1);
       } else if (e.key === 'Escape') {

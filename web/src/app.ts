@@ -1,10 +1,13 @@
 import { createBridge, HostError, type HostDoc, type PathEntry, type ReadyInfo } from './bridge';
+import { markChangedBlocks, stepChange } from './changes';
 import { CommandRegistry } from './commands';
 import { DocStore, encodingLabel, formatSize, type DocModel, type Encoding } from './docs';
+import { locationText, previewSelectionLines } from './locref';
 import { EditController } from './edit';
 import { DiagramRenderer } from './render/diagrams';
 import { createMarkdown, DIAGRAM_CLASS, renderMarkdown, scanHeadings, type Heading } from './render/markdown';
 import { basename, dirname, docKey, isUntitledPath } from './render/paths';
+import { Slugger } from './render/slug';
 import { createSanitizer, isViewablePath } from './render/sanitize';
 import {
   Debouncer, LIST_MIN, MAX_RECENT_FILES, MAX_RECENT_FOLDERS, PANEL_MAX, PANEL_MIN, parseSession, parseSettings, pushRecent, SCHEMA_VERSION,
@@ -13,7 +16,7 @@ import {
 import { TabManager, type Tab, type ViewMode } from './tabs';
 import { TocPanel } from './panels/toc';
 import { WorkspacePanel } from './panels/workspace';
-import { chunkBlocks, PreviewView, type LinkAction } from './views/preview';
+import { addCodeTools, chunkBlocks, PreviewView, type LinkAction } from './views/preview';
 import type { SourceView } from './views/source';
 import { ScrollSync } from './views/sync';
 import type { FindQuery, FindStatus } from './views/find';
@@ -21,7 +24,7 @@ import { MenuBar, type MenuDef, type MenuEntry } from './ui/menubar';
 import { TabBar } from './ui/tabbar';
 import { StatusBar } from './ui/statusbar';
 import { FindBar } from './ui/findbar';
-import { showDialog, toast } from './ui/dialog';
+import { promptText, showDialog, toast } from './ui/dialog';
 import { applyPageStrings, S } from './strings';
 
 interface Rendered {
@@ -118,7 +121,14 @@ export class App {
   private shown: { docId: string; version: number; allowRemote: boolean; dark: boolean } | null = null;
   private headings: Heading[] = [];
   private refreshTimer: ReturnType<typeof setTimeout> | null = null;
-  private pendingFragment: { docId: string; fragment: string } | null = null;
+  /** 문서를 처음 보일 때 옮겨 갈 조각(#제목). 뒤에서 연 탭(가운데 클릭 등)은 보일 때까지 기다린다. */
+  private pendingFragments = new Map<string, string>();
+  /** 위치를 붙여 연 실행기 인자 문서. 이전 뷰어 탭이 넘긴 줄로 덮지 않는다 (FR-LAUNCH-06). */
+  private locatedArgs = new Set<string>();
+  /** 바뀐 곳 이동의 현재 번호. 문서 버전이 바뀌면(다시 읽으면) 처음부터 센다 (FR-WATCH-05). */
+  private changeNav: { docId: string; version: number; index: number } | null = null;
+  /** 인쇄하는 동안 밝은 색으로 그린다 (FR-EXP-01). */
+  private printLight = false;
   private watchTimer: ReturnType<typeof setTimeout> | null = null;
   private saveSession = new Debouncer(() => this.persistSession(), 500);
   private saveSettings = new Debouncer(() => this.persistSettings(), 300);
@@ -148,6 +158,7 @@ export class App {
     this.tabbar.onOpenDialog = () => this.cmds.run('file.open');
     this.statusbar = new StatusBar($('statusbar'));
     this.statusbar.onEncodingClick = () => this.menubar.open(this.menuIndex(S.menu.encoding), true);
+    this.statusbar.onChangesClick = () => this.cmds.run('nav.nextChange');
     this.bindEvents();
 
     // 1) 첫 탭까지 그린다 (SDD 7.5, NFR-PERF-01).
@@ -175,14 +186,19 @@ export class App {
     const firstArg = [...args].reverse().find((e) => !e.isDir);
     const sess = this.session;
     const firstPath = firstArg?.path ?? sess.tabs[sess.activeIndex]?.path;
+    let firstOpened = false;
     if (firstPath) {
       const fromSession = sess.tabs.find((t) => docKey(t.path) === docKey(firstPath));
       const h = await this.readDoc(firstPath).catch(() => null);
       if (h) {
         const doc = this.docs.upsert(h);
-        const init = fromSession && !firstArg ? { mode: fromSession.mode, line: fromSession.line } : { mode: this.defaultMode(doc) };
+        // 실행기로 다시 연 문서도 지난 보기 모드·위치를 이어 간다. 위치를 붙여 열었으면 그 위치로 간다 (FR-FILE-04, FR-LAUNCH-06).
+        const init = { mode: fromSession?.mode ?? this.defaultMode(doc), line: firstArg?.line ?? fromSession?.line ?? 0 };
+        if (firstArg?.fragment) this.pendingFragments.set(doc.id, firstArg.fragment);
+        if (firstArg && (firstArg.line != null || firstArg.fragment)) this.locatedArgs.add(doc.id);
         this.tabs.open(doc.id, doc.path, init, true);
         if (firstArg) this.session.recentFiles = pushRecent(this.session.recentFiles, doc.path, MAX_RECENT_FILES);
+        firstOpened = true;
       }
     }
     this.started = true;
@@ -196,7 +212,9 @@ export class App {
     // 2) 실행기 이벤트에 붙고 나머지(세션의 다른 탭, 다른 인자)를 연다.
     this.bridge.connect();
     await this.restoreTabs(sess, firstPath).catch((err) => this.logError(S.log.restoreFailed((err as Error).message)));
-    if (args.length) await this.openEntries(args);
+    // 첫 인자는 이미 열었다. 다시 열면 그 위치로 또 옮겨 가므로 나머지만 연다.
+    const rest = firstOpened ? args.filter((e) => e !== firstArg) : args;
+    if (rest.length) await this.openEntries(rest, !firstOpened);
     this.updateWatch();
     this.saveSession.trigger();
     if (!this.tabs.active()) this.renderRecentList();
@@ -255,16 +273,29 @@ export class App {
     ch.postMessage({ type: 'hello', from: this.viewerId });
   }
 
-  /** 이전 뷰어 탭이 넘긴 문서 중 아직 열지 않은 것을 연다. 지금 보는 탭은 그대로 둔다. */
+  /**
+   * 이전 뷰어 탭이 넘긴 문서를 연다. 지금 보는 탭은 그대로 둔다. 이미 연 문서(다시 연 인자, 세션에서 연 탭)는
+   * 이전 탭이 넘긴 보기 모드·위치가 가장 새것이므로 그것으로 맞춘다. 위치를 붙여 연 인자는 그 위치를 지킨다 (FR-FILE-04).
+   */
   private async adoptTabs(tabs: { path: string; mode: ViewMode; line: number }[], workspace: string | null) {
     const active = this.tabs.activeId;
     for (const t of tabs) {
-      if (!this.tabs.byDoc(docKey(t.path))) await this.openFile(t.path, { activate: false, mode: t.mode, line: t.line });
+      const open = this.tabs.byDoc(docKey(t.path));
+      if (!open) await this.openFile(t.path, { activate: false, mode: t.mode, line: t.line });
+      else if (!this.locatedArgs.has(open.docId)) this.restoreTabView(open, t.mode, t.line);
     }
     if (workspace && !this.session.workspace) this.setWorkspace(workspace);
     if (active != null) this.tabs.activate(active);
     else if (this.tabs.tabs[0]) this.tabs.activate(this.tabs.tabs[0].id);
     this.updateWatch();
+  }
+
+  /** 탭의 보기 모드·위치를 바꾸고, 보이는 탭이면 다시 맞춘다. */
+  private restoreTabView(tab: Tab, mode: ViewMode, line: number) {
+    if (tab.mode === mode && Math.abs(tab.line - line) < 0.01) return;
+    this.tabs.setMode(tab.id, mode);
+    this.tabs.setLine(tab.id, line);
+    if (this.tabs.activeId === tab.id) this.showActive();
   }
 
   /** 새 뷰어 탭에 자리를 넘겼다. 연결과 세션 저장을 멈추고, 닫을 수 있으면 닫는다. */
@@ -293,6 +324,7 @@ export class App {
     this.workspace.onPickFolder = () => this.cmds.run('file.openFolder');
     this.workspace.onClose = () => this.setWorkspace(null);
     this.preview.onLink = (a) => void this.onLink(a);
+    this.preview.onCopyCode = (text) => void this.copyText(text);
 
     this.findbar.onQuery = (q) => this.runFind(q);
     this.findbar.onStep = (d) => this.stepFind(d);
@@ -385,7 +417,7 @@ export class App {
       // 디스크에서 읽은 본문만 화면 전체를 다시 맞춘다. 편집기에서 고친 본문은 편집 조정자가 미리보기만 고친다 (SDD 7.7).
       if (kind === 'content' && tab?.docId === doc.id) this.scheduleRefresh();
       if (kind === 'flags' && tab?.docId === doc.id && this.started && !this.retired) {
-        this.statusbar.render(doc, tab.mode, this.settings.zoom);
+        this.renderStatus(doc, tab);
         document.title = this.titleOf(doc);
       }
       this.tabbar?.render();
@@ -417,12 +449,18 @@ export class App {
       e.preventDefault();
       e.returnValue = '';
     });
+    // 다시 보이거나 포커스를 얻으면 작업 공간의 펼친 폴더를 다시 읽는다. 그사이 Claude 등이 만든 파일이 트리에 나타난다 (FR-WATCH-04).
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'hidden') flush();
-      else if (!this.retired) this.claimSession();
+      else if (!this.retired) {
+        this.claimSession();
+        void this.workspace.refresh();
+      }
     });
     window.addEventListener('focus', () => {
-      if (!this.retired) this.claimSession();
+      if (this.retired) return;
+      this.claimSession();
+      void this.workspace.refresh();
     });
 
     this.cmds.onError = (err) => this.reportError(err);
@@ -443,20 +481,29 @@ export class App {
     return 'preview';
   }
 
-  async openEntries(entries: PathEntry[]) {
+  /** 위치들을 연다. 파일은 탭으로, 폴더는 작업 공간으로. 위치(#제목·줄)가 붙은 파일은 그 위치로 간다 (FR-LAUNCH-06). */
+  async openEntries(entries: PathEntry[], activateLast = true) {
     let lastFile: Tab | undefined;
     for (const e of entries) {
       if (e.isDir) this.setWorkspace(e.path, true);
-      else lastFile = (await this.openFile(e.path, { activate: false })) ?? lastFile;
+      else lastFile = (await this.openFile(e.path, { activate: false, fragment: e.fragment, line: e.line })) ?? lastFile;
     }
-    if (lastFile) this.tabs.activate(lastFile.id);
+    if (lastFile && activateLast) this.tabs.activate(lastFile.id);
   }
 
   async openFile(path: string, opts: { fragment?: string; activate?: boolean; mode?: ViewMode; line?: number } = {}): Promise<Tab | undefined> {
     const existing = this.tabs.byDoc(docKey(path));
     if (existing) {
-      if (opts.activate !== false) this.tabs.activate(existing.id);
-      if (opts.fragment) this.gotoFragment(existing, opts.fragment);
+      // 옮겨 갈 위치를 먼저 걸어 두고 보인다. 보이는 탭이면 지금 다시 맞추고, 뒤에서 연 탭은 보일 때 옮겨 간다.
+      if (opts.fragment) this.pendingFragments.set(existing.docId, opts.fragment);
+      else if (opts.line != null) this.tabs.setLine(existing.id, opts.line);
+      if (opts.activate !== false) {
+        if (this.tabs.activeId === existing.id) {
+          if (opts.fragment || opts.line != null) this.showActive();
+        } else {
+          this.tabs.activate(existing.id);
+        }
+      }
       return existing;
     }
     let h: HostDoc;
@@ -472,7 +519,7 @@ export class App {
     }
     const doc = this.docs.upsert(h);
     // 탭을 여는 순간 showActive가 돌기 때문에 이동할 조각을 먼저 걸어 둔다.
-    if (opts.fragment) this.pendingFragment = { docId: doc.id, fragment: opts.fragment };
+    if (opts.fragment) this.pendingFragments.set(doc.id, opts.fragment);
     const tab = this.tabs.open(doc.id, doc.path, { mode: opts.mode ?? this.defaultMode(doc), line: opts.line ?? 0 }, opts.activate !== false);
     this.session.recentFiles = pushRecent(this.session.recentFiles, doc.path, MAX_RECENT_FILES);
     this.saveSession.trigger();
@@ -526,7 +573,7 @@ export class App {
     const doc = this.docs.byPath(path);
     if (!doc) return;
     try {
-      this.docs.upsert(await this.readDoc(doc.path, doc.forcedEncoding));
+      this.docs.upsert(await this.readDoc(doc.path, doc.forcedEncoding), false, true);
     } catch (err) {
       if (err instanceof HostError && err.code === 'ENOENT') this.docs.markDeleted(path);
       else this.logError(S.log.reloadFailed(path, (err as Error).message));
@@ -611,18 +658,19 @@ export class App {
       }
       // 문서마다 편집 상태를 갈아 끼운다. 바이너리 문서는 읽기 전용이다 (FR-EDIT-01).
       this.source.show(doc.id, doc.version, doc.binary ? '' : doc.text, !doc.binary);
+      this.source.setChanges(doc.changes ?? null);
     }
     const r = this.getRendered(doc);
     this.headings = r.headings;
     if (tab.mode !== 'source') this.showPreview(r);
     this.toc.setHeadings(this.headings);
-    this.statusbar.render(doc, tab.mode, this.settings.zoom);
+    this.renderStatus(doc, tab);
     this.workspace.setActive(doc.path);
     document.title = this.titleOf(doc);
     this.edit.updateBar();
     const line = tab.line;
-    const fragment = this.pendingFragment?.docId === doc.id ? this.pendingFragment.fragment : null;
-    this.pendingFragment = null;
+    const fragment = this.pendingFragments.get(doc.id) ?? null;
+    this.pendingFragments.delete(doc.id);
     requestAnimationFrame(() => {
       if (fragment) this.gotoFragment(tab, fragment);
       else this.scrollVisible(tab, line);
@@ -639,7 +687,7 @@ export class App {
   private onEdited(doc: DocModel) {
     const tab = this.tabs.active();
     if (!tab || tab.docId !== doc.id || this.retired) return;
-    this.statusbar.render(doc, tab.mode, this.settings.zoom);
+    this.renderStatus(doc, tab);
     document.title = this.titleOf(doc);
     if (tab.mode !== 'source') {
       const t0 = performance.now();
@@ -669,6 +717,15 @@ export class App {
     if (this.bridge.isRestorable(doc.path)) this.session.recentFiles = pushRecent(this.session.recentFiles, doc.path, MAX_RECENT_FILES);
     this.saveSession.trigger();
     if (tab && this.tabs.activeId === tab.id) this.showActive();
+    // 새 이름의 파일이 작업 공간 트리에 나타나게 한다 (FR-WATCH-04).
+    void this.workspace.refresh();
+  }
+
+  /** 상태 표시줄. 바뀐 곳으로 옮겨 간 중이면 몇 번째인지도 보인다 (FR-WATCH-05). */
+  private renderStatus(doc: DocModel, tab: Tab) {
+    const nav = this.changeNav;
+    this.statusbar.changeIndex = nav && nav.docId === doc.id && nav.version === doc.version ? nav.index : null;
+    this.statusbar.render(doc, tab.mode, this.settings.zoom);
   }
 
   /** 창 제목. 저장하지 않은 문서면 앞에 표시를 단다 (FR-EDIT-02). */
@@ -778,6 +835,7 @@ export class App {
       pre.textContent = doc.text;
       r.frag = document.createDocumentFragment();
       r.frag.append(pre);
+      if (doc.changes) markChangedBlocks(r.frag, doc.changes);
     } else if (doc.size > this.settings.largeFileMB * 1024 * 1024 && !doc.forcePreview) {
       r.headings = scanHeadings(doc.text);
       r.message = {
@@ -797,6 +855,9 @@ export class App {
           selfOrigin: /^https?:/.test(location.protocol) ? location.origin : undefined,
         });
         r.frag = chunkBlocks(clean);
+        addCodeTools(r.frag, { copy: S.preview.copyCode, copyTitle: S.preview.copyCodeTitle });
+        // 밖에서 바뀌어 다시 읽은 문서면 바뀐 블록을 표시한다. 표시는 이 버전의 렌더링에만 든다 (FR-WATCH-05).
+        if (doc.changes) markChangedBlocks(r.frag, doc.changes);
         this.loadImages(r.frag);
         r.hasDiagrams = !!r.frag.querySelector(`.${DIAGRAM_CLASS}`);
         if (r.hasDiagrams) this.diagrams.applyCached(r.frag);
@@ -848,8 +909,15 @@ export class App {
     requestAnimationFrame(() => requestAnimationFrame(() => (this.sync.suspended = false)));
   }
 
+  /**
+   * 조각(#…)으로 간다. 제목 id가 같거나, 실행기 인자처럼 제목 글을 그대로 준 경우(`#3.2 결과`)도 그 제목의 id로 맞춰 찾는다 (FR-LAUNCH-06).
+   */
   private gotoFragment(tab: Tab, fragment: string) {
-    const h = this.headings.find((x) => x.id === fragment || x.id === fragment.toLowerCase());
+    const want = decodeFragment(fragment);
+    const slug = new Slugger().slug(want);
+    const h =
+      this.headings.find((x) => x.id === want || x.id === want.toLowerCase()) ??
+      this.headings.find((x) => x.id === slug || x.text.trim() === want.trim());
     if (h) {
       this.gotoHeading(h);
       return;
@@ -867,7 +935,8 @@ export class App {
     } else if (a.kind === 'external') {
       await this.bridge.request('shell.openExternal', { url: a.url }).catch((err) => this.reportError(err));
     } else if (isViewablePath(a.path)) {
-      await this.openFile(a.path, { fragment: a.fragment });
+      // 가운데 클릭은 지금 탭에 머문 채 새 탭으로 연다 (FR-NAV-03).
+      await this.openFile(a.path, { fragment: a.fragment, activate: !a.background });
     } else if (this.canReveal(a.path)) {
       // 문서가 아닌 로컬 파일은 실행하지 않고 탐색기에서 위치만 보여준다 (SRS 4.3).
       await this.bridge.request('shell.reveal', { path: a.path }).catch((err) => this.reportError(err));
@@ -923,6 +992,7 @@ export class App {
   // ------------------------------------------------------------------ 설정·테마·패널
 
   private isDark(): boolean {
+    if (this.printLight) return false;
     return this.settings.theme === 'dark' || (this.settings.theme === 'system' && this.systemDark.matches);
   }
 
@@ -935,7 +1005,7 @@ export class App {
     const shown = this.shown;
     if (shown && shown.dark !== dark && this.renderCache.get(shown.docId)?.hasDiagrams) this.forceRerender(shown.docId);
     // Windows 앱의 제목 표시줄도 맞춘다. 시작할 때는 호스트가 저장된 설정을 보고 이미 맞췄다.
-    if (this.started && this.bridge.mode === 'desktop') void this.bridge.request('window.setTheme', { dark }).catch((err) => this.logError(String(err)));
+    if (this.started && this.bridge.mode === 'desktop' && !this.printLight) void this.bridge.request('window.setTheme', { dark }).catch((err) => this.logError(String(err)));
   }
 
   private setTheme(theme: Theme) {
@@ -1140,24 +1210,132 @@ export class App {
     this.showActive();
   }
 
+  /**
+   * 인쇄 (FR-EXP-01). 화면 테마와 관계없이 밝은 색으로 인쇄한다. 글자색은 인쇄 CSS가 되돌리지만, 다이어그램은 테마 색을 SVG에 담으므로
+   * 다크 테마면 잠시 밝은 테마로 다시 그리고, 인쇄가 끝나면 되돌린다.
+   */
   private print() {
     this.edit.flush();
     const tab = this.tabs.active();
     const doc = this.activeDoc();
     if (!tab || !doc) return;
+    const swap = this.isDark();
+    if (swap) this.setPrintLight(true);
     if (tab.mode === 'source') this.showPreview(this.getRendered(doc));
     document.body.classList.add('printing');
+    let finished = false;
     const done = () => {
+      if (finished) return;
+      finished = true;
       document.body.classList.remove('printing');
       window.removeEventListener('afterprint', done);
+      if (swap) this.setPrintLight(false);
     };
     window.addEventListener('afterprint', done);
+    // 인쇄 미리보기는 print()를 부를 때 문서를 떠 두므로, 돌아온 뒤 되돌려도 된다. afterprint가 오지 않는 환경도 있다.
+    const go = () => {
+      window.print();
+      setTimeout(done, 0);
+    };
     // 아직 그리는 다이어그램이 있으면 잠시 기다려 원문 코드 대신 다이어그램이 인쇄되게 한다 (FR-REN-07).
-    if (this.diagrams.busy) void this.diagrams.idle(PRINT_DIAGRAM_WAIT_MS).then(() => window.print());
-    else window.print();
+    if (swap || this.diagrams.busy) void this.diagrams.idle(PRINT_DIAGRAM_WAIT_MS).then(go);
+    else go();
   }
 
-  private async copyText(text: string) {
+  private setPrintLight(on: boolean) {
+    this.printLight = on;
+    this.applyTheme();
+  }
+
+  /** 줄(0부터)로 간다 (FR-NAV-05). 원문 보기에서 cursor면 커서도 옮긴다. */
+  private gotoLine(tab: Tab, line: number, cursor = false) {
+    this.sync.suspended = true;
+    this.tabs.setLine(tab.id, line);
+    if (tab.mode !== 'source') this.preview.scrollToLine(line);
+    if (tab.mode !== 'preview' && this.source) {
+      this.source.scrollToLine(line);
+      if (cursor) {
+        this.source.setCursorLine(line);
+        this.source.focus();
+      }
+    }
+    this.toc.setCurrentLine(line);
+    requestAnimationFrame(() => requestAnimationFrame(() => (this.sync.suspended = false)));
+  }
+
+  /** 줄로 이동 대화상자 (Ctrl+G, FR-NAV-05). 줄은 1부터 센다. */
+  private async promptGotoLine() {
+    const tab = this.tabs.active();
+    const doc = this.activeDoc();
+    if (!tab || !doc) return;
+    const total = doc.text.split('\n').length;
+    const v = await promptText(S.gotoLine.title, S.gotoLine.label(total), String(Math.floor(tab.line) + 1));
+    if (v == null || this.tabs.active() !== tab) return;
+    const n = Number(v.trim());
+    if (!Number.isInteger(n) || n < 1) {
+      toast(S.gotoLine.invalid(v.trim()), 'error');
+      return;
+    }
+    this.gotoLine(tab, Math.min(n, total) - 1, true);
+  }
+
+  /** 다음(1)·이전(-1) 바뀐 곳으로 간다 (FR-WATCH-05). */
+  private gotoChange(dir: 1 | -1) {
+    const tab = this.tabs.active();
+    const doc = this.activeDoc();
+    const ranges = doc?.changes;
+    if (!tab || !doc || !ranges?.length) return;
+    const nav = this.changeNav;
+    const current = nav && nav.docId === doc.id && nav.version === doc.version ? nav.index : null;
+    const index = stepChange(ranges, current, tab.line, dir);
+    this.changeNav = { docId: doc.id, version: doc.version, index };
+    this.gotoLine(tab, ranges[index].start);
+    this.renderStatus(doc, tab);
+  }
+
+  /**
+   * 위치 복사 (FR-INFO-04): 고른 부분을 Claude Code 대화에 붙여 넣을 '경로:줄' 한 줄과 인용문으로 복사한다.
+   * 분할 보기는 마지막으로 포커스를 둔 쪽에서 고른 부분을 쓴다. 고른 것이 없으면 지금 줄을 쓴다.
+   */
+  private async copyLocation() {
+    this.edit.flush();
+    const tab = this.tabs.active();
+    const doc = this.activeDoc();
+    if (!tab || !doc) return;
+    const side = tab.mode === 'split' ? tab.findTarget : tab.mode;
+    let start = Math.floor(tab.line);
+    let end = start;
+    let quote = '';
+    if (side === 'source' && this.source) {
+      ({ start, end, text: quote } = this.source.selectionLines());
+    } else {
+      const range = this.previewRange();
+      const r = range ? previewSelectionLines(this.preview.article, range, doc.text.split('\n')) : null;
+      if (r && range) {
+        ({ start, end } = r);
+        quote = range.toString();
+      }
+    }
+    const text = locationText(this.locationPath(doc.path), start, end, quote);
+    await this.copyText(text, S.toast.copiedLocation(text.split('\n')[0]));
+  }
+
+  /** 미리보기 안에서 고른 범위. 미리보기는 Shadow DOM이라 그 루트의 선택을 먼저 본다. 고른 것이 없거나 밖이면 null */
+  private previewRange(): Range | null {
+    const root = this.preview.root as ShadowRoot & { getSelection?: () => Selection | null };
+    const sel = root.getSelection?.() ?? document.getSelection();
+    if (!sel || !sel.rangeCount || sel.isCollapsed) return null;
+    const range = sel.getRangeAt(0);
+    return this.preview.article.contains(range.startContainer) && this.preview.article.contains(range.endContainer) ? range : null;
+  }
+
+  /** 위치 복사에 쓸 경로. 실행기·Windows 앱은 절대 경로, 독립 모드(mdv:)는 열린 폴더 기준 이름, 새 문서는 이름 */
+  private locationPath(path: string): string {
+    if (isUntitledPath(path)) return basename(path);
+    return /^mdv:/i.test(path) ? this.bridge.displayPath(path) : path;
+  }
+
+  private async copyText(text: string, done: string = S.toast.copied) {
     try {
       await navigator.clipboard.writeText(text);
     } catch {
@@ -1168,7 +1346,7 @@ export class App {
       document.execCommand('copy');
       ta.remove();
     }
-    toast(S.toast.copied);
+    toast(done);
   }
 
   private registerCommands() {
@@ -1353,11 +1531,19 @@ export class App {
         toast(on ? S.toast.openWithOn : S.toast.openWithOff);
       },
     });
-    // v1.1 이후 기능의 단축키(SRS 4.2). 기능은 없지만 키를 잡아 브라우저 기본 동작(뒤로 가기·즐겨찾기 등)으로 빠지지 않게 한다.
-    const later: [string, string][] = [
-      ['nav.back', 'Alt+Left'], ['nav.forward', 'Alt+Right'], ['nav.gotoLine', 'Ctrl+G'], ['nav.quickOpen', 'Ctrl+Shift+O'], ['find.inFolder', 'Ctrl+Shift+F'],
+    // 아직 없는 기능의 단축키(SRS 4.2). 키를 잡아 브라우저 기본 동작(뒤로 가기·즐겨찾기 등)으로 빠지지 않게 하고, 누르면 기능 이름과 함께 알린다.
+    const later: [string, string, string][] = [
+      ['nav.back', 'Alt+Left', S.later.back], ['nav.forward', 'Alt+Right', S.later.forward],
+      ['nav.quickOpen', 'Ctrl+Shift+O', S.later.quickOpen], ['find.inFolder', 'Ctrl+Shift+F', S.later.findInFolder],
     ];
-    for (const [id, key] of later) c.register({ id, title: S.cmd.reserved, keys: [key], reserved: true, run: () => toast(S.toast.notYet) });
+    for (const [id, key, name] of later) c.register({ id, title: S.cmd.reserved, keys: [key], reserved: true, run: () => toast(S.toast.notYet(name)) });
+
+    // Claude Code 보고서 흐름 (v2.1): 줄로 이동, 바뀐 곳 이동, 위치 복사
+    c.register({ id: 'nav.gotoLine', title: S.cmd.gotoLine, keys: ['Ctrl+G'], enabled: hasTab, run: () => this.promptGotoLine() });
+    const hasChanges = () => !!this.activeDoc()?.changes?.length;
+    c.register({ id: 'nav.nextChange', title: S.cmd.nextChange, keys: ['Alt+F5'], enabled: hasChanges, run: () => this.gotoChange(1) });
+    c.register({ id: 'nav.prevChange', title: S.cmd.prevChange, keys: ['Alt+Shift+F5'], enabled: hasChanges, run: () => this.gotoChange(-1) });
+    c.register({ id: 'edit.copyLocation', title: S.cmd.copyLocation, keys: ['Ctrl+Alt+C'], enabled: hasTab, run: () => this.copyLocation() });
 
     c.register({ id: 'tab.next', title: S.cmd.tabNext, keys: ['Alt+PageDown'], enabled: () => this.tabs.tabs.length > 1, run: () => this.tabs.cycle(1) });
     c.register({ id: 'tab.prev', title: S.cmd.tabPrev, keys: ['Alt+PageUp'], enabled: () => this.tabs.tabs.length > 1, run: () => this.tabs.cycle(-1) });
@@ -1402,7 +1588,7 @@ export class App {
       },
       {
         label: S.menu.edit, key: 'E',
-        items: () => [{ cmd: 'edit.undo' }, { cmd: 'edit.redo' }, { sep: true }, { cmd: 'edit.replace' }],
+        items: () => [{ cmd: 'edit.undo' }, { cmd: 'edit.redo' }, { sep: true }, { cmd: 'edit.replace' }, { sep: true }, { cmd: 'edit.copyLocation' }],
       },
       {
         label: S.menu.view, key: 'V',
@@ -1418,7 +1604,11 @@ export class App {
       { label: S.menu.find, key: 'S', items: () => [{ cmd: 'find.open' }, { cmd: 'find.next' }, { cmd: 'find.prev' }] },
       {
         label: S.menu.go, key: 'G',
-        items: () => [{ cmd: 'tab.next' }, { cmd: 'tab.prev' }],
+        items: () => [
+          { cmd: 'tab.next' }, { cmd: 'tab.prev' },
+          { sep: true }, { cmd: 'nav.gotoLine' },
+          { sep: true }, { cmd: 'nav.nextChange' }, { cmd: 'nav.prevChange' },
+        ],
       },
       {
         label: S.menu.encoding, key: 'N',
@@ -1504,6 +1694,15 @@ function dragSize(handle: HTMLElement, axis: 'x' | 'y', dir: 1 | -1, start: () =
     handle.addEventListener('pointermove', move);
     handle.addEventListener('pointerup', up);
   });
+}
+
+/** 퍼센트 인코딩된 조각을 푼다. 풀 수 없으면 그대로 */
+function decodeFragment(f: string): string {
+  try {
+    return decodeURIComponent(f);
+  } catch {
+    return f;
+  }
 }
 
 function nextPaint(): Promise<void> {

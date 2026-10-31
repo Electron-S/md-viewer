@@ -26,6 +26,9 @@
   --hl-attr: #0550ae;
   --hl-built: #953800;
   --hl-meta: #116329;
+  /* 밖에서 바뀐 곳 표시 (FR-WATCH-05): 바뀐 블록·줄, 줄을 지운 자리 */
+  --changed: #d29922;
+  --changed-del: #cf222e;
   --mdv-zoom: 1;
   color-scheme: light;
 }
@@ -57,6 +60,8 @@
   --hl-attr: #79c0ff;
   --hl-built: #ffa657;
   --hl-meta: #7ee787;
+  --changed: #e3b341;
+  --changed-del: #f85149;
   color-scheme: dark;
 }
 
@@ -211,6 +216,7 @@ button:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--accent
 .status-item:last-child { border-right: none; }
 .status-button { background: none; border: none; border-right: 1px solid var(--line); border-radius: 0; font-size: 12px; color: var(--fg-muted); }
 .status-item.warn { color: var(--warn); font-weight: 600; }
+.status-button.changed { color: var(--fg); font-weight: 600; box-shadow: inset 3px 0 0 var(--changed); padding-left: 10px; }
 
 /* 대화상자·알림 */
 .mdv-dialog { border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--fg); padding: 18px 20px; min-width: 360px; max-width: 640px; max-height: 80vh; }
@@ -233,4 +239,25 @@ button:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--accent
 @media print {
   html, body, #app, #body, #main, #views, .pane.preview, .preview-scroll { display: block !important; height: auto !important; overflow: visible !important; }
   #menubar, #tabbar, #side, #resizer, #toc-side, #toc-resizer, #statusbar, #find-slot, #edit-bar, #empty, .pane.source, .toast-box, .preview-notice, .mdv-mermaid-stage { display: none !important; }
+  /* 화면 테마와 관계없이 밝은 색으로 인쇄한다 (FR-EXP-01). 다이어그램은 app.ts print()가 밝은 테마로 다시 그린다. */
+  :root, :root[data-theme='dark'] {
+    --bg: #ffffff;
+    --fg: #1f2328;
+    --md-fg: #1f2328;
+    --md-muted: #59636e;
+    --md-border: #d1d9e0;
+    --md-code-bg: #f6f8fa;
+    --md-quote: #59636e;
+    --md-link: #0969da;
+    --md-table-alt: #f6f8fa;
+    --hl-keyword: #cf222e;
+    --hl-string: #0a3069;
+    --hl-number: #0550ae;
+    --hl-comment: #6e7781;
+    --hl-title: #8250df;
+    --hl-attr: #0550ae;
+    --hl-built: #953800;
+    --hl-meta: #116329;
+    color-scheme: light;
+  }
 }

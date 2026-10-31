@@ -358,7 +358,8 @@ export class EditController {
     }
     const now = this.sync(cur.id) ?? cur;
     if (!now.dirty) {
-      this.docs.upsert(h);
+      // 바뀐 곳을 남겨 미리보기·원문 보기에 표시한다 (FR-WATCH-05).
+      this.docs.upsert(h, false, true);
       if (this.conflicts.delete(now.id)) this.updateBar();
       return;
     }
@@ -420,7 +421,7 @@ export class EditController {
       // 그사이 지워졌으면 알렸던 내용을 쓴다.
     }
     this.discard(docId);
-    if (h) this.docs.upsert(h, true);
+    if (h) this.docs.upsert(h, true, true);
   }
 
   // ------------------------------------------------------------------ 닫기 확인 (FR-EDIT-08, SDD 7.7-6)

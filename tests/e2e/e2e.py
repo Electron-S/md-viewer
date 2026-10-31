@@ -275,6 +275,13 @@ def prepare_launcher_docs():
     write(ed / '충돌.md', '# 충돌\n\n원래 내용\n')
     write(ed / '닫기.md', '# 닫기\n\n원래\n')
     write(ed / '자동.md', '# 자동 저장\n')
+    # Claude Code 보고서 흐름 (v2.1): 위치 붙여 열기, 바뀐 곳, 위치 복사, 코드 복사, 작업 공간 다시 읽기, 가운데 클릭, 인쇄
+    rp = DOCS / '보고서'
+    sections = ''.join(f'## {t}\n\n' + f'{t} 본문 문단입니다. ' * 8 + '\n\n' + ''.join(f'{t} 채우기 문단 {i}입니다.\n\n' for i in range(25))
+                       for t in ['첫째 절', '둘째 절', '셋째 절', '넷째 절'])
+    write(rp / '보고서.md', '# 보고서\n\n[부록](부록.md)\n\n- 항목 1\n- 항목 2\n- 항목 3\n\n```bash\nnpm run build\nnode tools/test.mjs\n```\n\n' + sections)
+    write(rp / '부록.md', '# 부록\n')
+    write(rp / '하위' / '하위 문서.md', '# 하위 문서\n')
     write(ed / '바꾸기.md', '# 바꾸기\n\n사과 하나, 사과 둘, 사과 셋\n')
     hundred, i = [], 0
     while sum(len(x.encode('utf-8')) for x in hundred) < 100_000:
@@ -740,7 +747,7 @@ def run_launcher(pw, L, ctx):
         }''')
         url0 = a.page.url
         keys = ['F5', 'Control+p', 'Control+b', 'Control+b', 'Control+2', 'Control+1', 'Control+=', 'Control+-', 'Control+0',
-                'Alt+ArrowLeft', 'Alt+ArrowRight', 'Control+g', 'Control+Shift+O', 'Control+Shift+F', 'F3', 'Shift+F3', 'Control+s', 'Control+h']
+                'Alt+ArrowLeft', 'Alt+ArrowRight', 'Control+Shift+O', 'Control+Shift+F', 'F3', 'Shift+F3', 'Control+s', 'Control+h']
         for k in keys:
             a.key(k)
         a.page.wait_for_timeout(300)
@@ -750,7 +757,13 @@ def run_launcher(pw, L, ctx):
               r['alive'] == 1 and a.page.url == url0 and not missed and len(r['keys']) == len(keys), f'막지 못한 키={missed} 받은 키={len(r["keys"])}/{len(keys)}')
         check('FR-EXP-01', 'Ctrl+P는 뷰어의 인쇄(window.print)를 부른다', r['printed'] == 1, r['printed'])
         toast = a.page.locator('.toast').all_inner_texts()
-        check('NFR-USE-01', '다음 버전 단축키는 안내만 띄운다', any('다음 버전' in t for t in toast), toast[-3:])
+        check('NFR-USE-01', '다음 버전 단축키는 기능 이름과 함께 안내만 띄운다', any('다음 버전' in t and '뒤로 가기' in t for t in toast), toast[-3:])
+        # Ctrl+G는 v2.1부터 줄로 이동 대화상자를 연다. 대화상자가 열린 뒤의 키는 뷰어가 받지 않으므로 위 목록과 따로 본다.
+        a.key('Control+g')
+        title = a.page.locator('dialog.mdv-dialog[open] h2').inner_text(timeout=3000)
+        last = a.ev('() => window.__keys.at(-1)')
+        a.key('Escape')
+        check('FR-NAV-05', 'Ctrl+G는 브라우저 동작 대신 줄로 이동 대화상자를 연다', title == '줄로 이동' and last == ['g', True] and a.page.url == url0, (title, last))
     guard('NFR-USE-01', '브라우저 단축키 충돌', t_browser_keys)
 
     def t_encoding():
@@ -1142,6 +1155,238 @@ def run_launcher(pw, L, ctx):
         a.settle()
         check('FR-FILE-05', '모든 탭을 닫고 파일이 바뀐 뒤 다시 열면 새 내용', a.h1() == '새 내용', a.h1())
     guard('FR-FILE-05', '닫은 탭 다시 열기', t_stale_reopen)
+
+    # ---- Claude Code 보고서 흐름 (v2.1)
+    RP = DOCS / '보고서'
+    REPORT = RP / '보고서.md'
+    TAB_VIEW = '() => ({ path: __mdv.tabs.active()?.path, mode: __mdv.tabs.active()?.mode, line: __mdv.tabs.active()?.line })'
+    COPIED = '''() => { window.__copied = []; navigator.clipboard.writeText = async (t) => { window.__copied.push(t); }; }'''
+
+    def relaunch(*args):
+        """실행기를 다시 불러 새 뷰어 탭을 열고, 이전 탭이 물러나면 그 탭을 cur[0]으로 삼는다."""
+        prev = cur[0]
+        nxt = Viewer.open(ctx, L.open(*args, root=P(DOCS)))
+        how = prev.retired()
+        if not prev.page.is_closed():
+            prev.page.close()
+        cur[0] = nxt
+        return nxt, how
+
+    def t_report_reopen():
+        # 같은 문서를 실행기로 다시 열어도 보기 모드·위치를 이어 간다 (FR-FILE-04)
+        a = cur[0]
+        a.open_file(P(REPORT))
+        a.ev("() => __mdv.cmds.run('view.split')")
+        a.wait('() => !!__mdv.source && __mdv.source.docId === __mdv.activeDoc()?.id', 8000)
+        # 보기를 바꾼 직후에는 화면이 위치를 맞추는 중이라 스크롤을 기록하지 않는다. set_tab처럼 가라앉은 뒤 내린다.
+        a.settle()
+        a.page.wait_for_timeout(300)
+        a.ev('() => { __mdv.preview.el.scrollTop = 2500; }')
+        a.page.wait_for_timeout(600)
+        before = a.ev(TAB_VIEW)
+        b, how = relaunch(P(REPORT))
+        b.wait('(p) => __mdv.tabs.active()?.path === p', 5000, arg=P(REPORT))
+        b.page.wait_for_timeout(600)
+        after = b.ev(TAB_VIEW)
+        check('FR-FILE-04', '같은 문서를 실행기로 다시 열어도 보기 모드·읽던 위치를 이어 간다',
+              how and before['line'] > 20 and after['mode'] == 'split' and abs(after['line'] - before['line']) < 1.5, f'{before} → {after}, 이전 탭={how}')
+        b.ev("() => __mdv.cmds.run('view.preview')")
+    guard('FR-FILE-04', '같은 문서 다시 열기', t_report_reopen)
+
+    def t_report_locate():
+        # 위치를 붙여 열기: #제목(제목 글 그대로), :줄 (FR-LAUNCH-06)
+        b, _ = relaunch(P(REPORT) + '#셋째 절')
+        b.wait('(p) => __mdv.tabs.active()?.path === p', 5000, arg=P(REPORT))
+        b.page.wait_for_timeout(700)
+        h = b.ev('() => __mdv.headings.find(h => h.text === "셋째 절").line')
+        top = b.ev('() => __mdv.preview.topLine()')
+        check('FR-LAUNCH-06', 'mdview 문서.md#제목은 그 제목 위치에 연다', abs(top - h) < 2, f'top={top:.1f} 제목={h}')
+        c, _ = relaunch(P(REPORT) + ':120')
+        c.wait('(p) => __mdv.tabs.active()?.path === p', 5000, arg=P(REPORT))
+        c.page.wait_for_timeout(700)
+        st = c.ev(TAB_VIEW)
+        top = c.ev('() => __mdv.preview.topLine()')
+        check('FR-LAUNCH-06', 'mdview 문서.md:줄은 그 줄(1부터) 위치에 연다', abs(st['line'] - 119) < 1.5 and abs(top - 119) < 3, f'{st} top={top:.1f}')
+    guard('FR-LAUNCH-06', '위치 붙여 열기', t_report_locate)
+
+    def t_report_changes():
+        # 밖에서 고치면 바뀐 곳을 표시하고 Alt+F5로 옮겨 다닌다 (FR-WATCH-05)
+        a = cur[0]
+        a.open_file(P(REPORT))
+        a.ev("() => __mdv.cmds.run('view.preview')")
+        a.ev('() => { __mdv.preview.el.scrollTop = 0; }')
+        text = REPORT.read_bytes().decode('utf-8')
+        write(REPORT, text.replace('둘째 절 본문 문단입니다.', '둘째 절 본문을 Claude가 고쳤습니다.').replace('- 항목 3\n', '- 항목 3\n- 새 항목\n'))
+        a.wait('() => (__mdv.activeDoc()?.changes?.length ?? 0) === 2', 5000)
+        a.page.wait_for_timeout(400)
+        r = a.ev('''() => ({ marked: [...__mdv.preview.article.querySelectorAll('.mdv-changed')].map(e => e.textContent.trim().slice(0, 12)),
+            status: document.querySelector('[data-field="changes"]')?.textContent, changes: __mdv.activeDoc().changes })''')
+        check('FR-WATCH-05', '밖에서 고치면 바뀐 블록을 표시하고 상태 표시줄에 바뀐 곳 수를 보인다',
+              len(r['marked']) == 2 and r['marked'][0] == '새 항목' and r['marked'][1].startswith('둘째 절 본문을') and r['status'] == '바뀐 곳 2', r)
+        starts = [c['start'] for c in r['changes']]
+        seen = []
+        for k in ['Alt+F5', 'Alt+F5', 'Shift+Alt+F5']:
+            a.key(k)
+            a.page.wait_for_timeout(500)
+            seen.append((a.ev('() => __mdv.tabs.active().line'), a.ev('''() => document.querySelector('[data-field="changes"]').textContent''')))
+        ok = all(abs(x[0] - w) < 1.5 for x, w in zip(seen, [starts[0], starts[1], starts[0]])) and [x[1] for x in seen] == ['바뀐 곳 1/2', '바뀐 곳 2/2', '바뀐 곳 1/2']
+        check('FR-WATCH-05', 'Alt+F5·Shift+Alt+F5로 바뀐 곳을 차례로 옮겨 다닌다', ok, f'{seen} 시작줄={starts}')
+        ed_source(a)
+        # 편집기는 보이는 줄만, 보기를 바꾼 뒤 다음 측정 때 그린다. 지금 위치(첫 바뀐 곳)의 줄이 그려질 때까지 기다린 뒤 표시를 본다.
+        try:
+            a.wait('''() => [...document.querySelectorAll('.pane.source .cm-line')].some(e => e.textContent === '- 새 항목')''', 3000)
+        except Exception:
+            pass
+        marked = a.ev("() => [...document.querySelectorAll('.pane.source .cm-line.cm-mdv-changed')].map(e => e.textContent)")
+        diag = a.ev('''() => ({ changes: __mdv.activeDoc().changes, mode: __mdv.tabs.active().mode, line: __mdv.tabs.active().line,
+            vp: __mdv.source.view.viewport, rendered: document.querySelectorAll('.pane.source .cm-line').length,
+            first: document.querySelector('.pane.source .cm-line')?.textContent?.slice(0, 20) ?? null })''')
+        ed_type(a, ' 사용자')
+        a.wait('() => !__mdv.activeDoc().changes', 5000)
+        a.page.wait_for_timeout(200)
+        gone = a.ev("() => document.querySelectorAll('.pane.source .cm-line.cm-mdv-changed').length")
+        check('FR-WATCH-05', '원문 보기도 바뀐 줄을 표시하고, 고치기 시작하면 표시를 지운다', '- 새 항목' in marked and gone == 0, f'표시 {[m[:20] for m in marked]} → 고친 뒤 {gone}줄 {diag}')
+        a.ev('() => { __mdv.edit.discard(__mdv.activeDoc().id); }')
+        a.key('F5')
+        a.ev("() => __mdv.cmds.run('view.preview')")
+    guard('FR-WATCH-05', '바뀐 곳 표시', t_report_changes)
+
+    def t_report_copy_location():
+        # 위치 복사: 미리보기는 고른 블록의 원문 줄, 원문 보기는 고른 줄 (FR-INFO-04)
+        a = cur[0]
+        a.open_file(P(REPORT))
+        a.ev("() => __mdv.cmds.run('view.preview')")
+        a.ev(COPIED)
+        para = a.page.locator('.preview-host p', has_text='첫째 절 본문 문단입니다').first
+        para.scroll_into_view_if_needed()
+        para.click(click_count=3)
+        a.key('Control+Alt+c')
+        a.page.wait_for_timeout(300)
+        src = REPORT.read_bytes().decode('utf-8').split('\n')
+        want = src.index(next(x for x in src if x.startswith('첫째 절 본문 문단입니다'))) + 1
+        got = a.ev('() => window.__copied.at(-1) ?? ""')
+        check('FR-INFO-04', '위치 복사(미리보기): 고른 문단의 경로:줄과 인용', got.split('\n')[0] == f'{P(REPORT)}:{want}' and got.split('\n')[1].startswith('> 첫째 절 본문'), got[:120])
+        ed_source(a)
+        a.ev('''() => { const v = __mdv.source.view, d = v.state.doc; v.dispatch({ selection: { anchor: d.line(5).from, head: d.line(7).to } }); v.focus(); }''')
+        a.key('Control+Alt+c')
+        a.page.wait_for_timeout(300)
+        got = a.ev('() => window.__copied.at(-1) ?? ""')
+        check('FR-INFO-04', '위치 복사(원문 보기): 고른 줄 범위', got == f'{P(REPORT)}:5-7\n> - 항목 1\n> - 항목 2\n> - 항목 3', got)
+        a.ev("() => __mdv.cmds.run('view.preview')")
+    guard('FR-INFO-04', '위치 복사', t_report_copy_location)
+
+    def t_report_goto_code():
+        # Ctrl+G 줄로 이동(원문은 커서도), 코드 블록 복사 버튼 (FR-NAV-05, FR-REN-09)
+        a = cur[0]
+        a.open_file(P(REPORT))
+        ed_source(a)
+        a.key('Control+g')
+        ed_prompt(a, '80')
+        a.page.wait_for_timeout(500)
+        st = a.ev('() => ({ line: __mdv.tabs.active().line, cursor: __mdv.source.view.state.doc.lineAt(__mdv.source.view.state.selection.main.head).number })')
+        a.ev("() => __mdv.cmds.run('view.preview')")
+        a.key('Control+g')
+        ed_prompt(a, '150')
+        a.page.wait_for_timeout(600)
+        top = a.ev('() => __mdv.preview.topLine()')
+        check('FR-NAV-05', 'Ctrl+G: 원문 보기는 그 줄로 가고 커서도 옮기며, 미리보기는 그 줄의 블록으로 간다',
+              abs(st['line'] - 79) < 1.5 and st['cursor'] == 80 and abs(top - 149) < 3, f'{st} 미리보기 top={top:.1f}')
+        a.ev(COPIED)
+        tools = a.ev('''() => { const t = __mdv.preview.root.querySelector('.mdv-code-tools');
+            return { lang: t.querySelector('.mdv-code-lang')?.getAttribute('data-label'), text: t.textContent }; }''')
+        a.ev("() => __mdv.preview.root.querySelector('.mdv-code-copy').click()")
+        a.page.wait_for_timeout(300)
+        got = a.ev('() => window.__copied.at(-1) ?? ""')
+        check('FR-REN-09', '코드 블록의 복사 버튼은 코드만 복사하고 언어 이름을 보인다',
+              got == 'npm run build\nnode tools/test.mjs\n' and tools['lang'] == 'bash' and tools['text'] == '', f'{got!r} {tools}')
+    guard('FR-NAV-05', '줄로 이동·코드 복사', t_report_goto_code)
+
+    def t_report_workspace():
+        # Claude가 새 파일을 만들면 창이 포커스를 얻을 때 작업 공간에 나타난다 (FR-WATCH-04)
+        a = cur[0]
+        a.ev('(p) => __mdv.setWorkspace(p, true)', P(RP))
+        a.wait('() => [...document.querySelectorAll(".ws-item")].some(e => e.textContent === "▸ 하위")', 5000)
+        a.page.locator('.ws-item', has_text='하위').first.click()
+        a.wait('() => [...document.querySelectorAll(".ws-item")].some(e => e.textContent === "하위 문서.md")', 5000)
+        write(RP / '새 보고서.md', '# 새 보고서\n')
+        write(RP / '하위' / '새 하위 문서.md', '# 새 하위\n')
+        a.ev("() => window.dispatchEvent(new Event('focus'))")
+        try:
+            a.wait('() => [...document.querySelectorAll(".ws-item")].some(e => e.textContent === "새 하위 문서.md")', 5000)
+        except Exception:
+            pass
+        items = a.page.locator('.ws-item').all_inner_texts()
+        check('FR-WATCH-04', '창이 포커스를 얻으면 새 파일이 작업 공간에 나타나고 펼친 폴더는 그대로다',
+              '새 보고서.md' in items and '새 하위 문서.md' in items and '▾ 하위' in items, items)
+        a.page.locator('.ws-head .icon-button', has_text='↻').click()
+        a.page.wait_for_timeout(500)
+        items = a.page.locator('.ws-item').all_inner_texts()
+        check('FR-WATCH-04', '새로 고침(↻)도 펼친 폴더를 그대로 둔다', '▾ 하위' in items and '하위 문서.md' in items, items)
+    guard('FR-WATCH-04', '작업 공간 다시 읽기', t_report_workspace)
+
+    def t_report_middle_click():
+        # 로컬 문서 링크 가운데 클릭: 뷰어의 새 탭(뒤)으로 열고 브라우저 탭은 늘지 않는다 (FR-NAV-03)
+        a = cur[0]
+        a.ev('''() => { const t = __mdv.tabs.tabs.find(t => t.path.endsWith('/부록.md')); if (t) __mdv.tabs.close(t.id); }''')
+        a.open_file(P(REPORT))
+        a.ev("() => __mdv.cmds.run('view.preview')")
+        n0 = a.ev('() => __mdv.tabs.tabs.length')
+        pages0 = len(ctx.pages)
+        link = a.page.locator('.preview-host a', has_text='부록').first
+        link.scroll_into_view_if_needed()
+        link.click(button='middle')
+        try:
+            a.wait('(n) => __mdv.tabs.tabs.length === n + 1', 5000, arg=n0)
+        except Exception:
+            pass
+        a.page.wait_for_timeout(500)
+        st = a.state()
+        check('FR-NAV-03', '로컬 문서 링크를 가운데 클릭하면 뷰어의 새 탭으로 열고 지금 탭에 머문다',
+              len(st['tabs']) == n0 + 1 and st['active'] == P(REPORT) and len(ctx.pages) == pages0, f'탭 {n0}→{len(st["tabs"])} 활성={st["active"]} 브라우저 탭 {pages0}→{len(ctx.pages)}')
+    guard('FR-NAV-03', '가운데 클릭', t_report_middle_click)
+
+    def t_report_print():
+        # 인쇄: 테마와 관계없이 밝은 색, 긴 코드 줄 접기, 도구·표시 숨김. 다크 테마면 밝은 테마로 그려 인쇄한 뒤 되돌린다 (FR-EXP-01)
+        a = cur[0]
+        a.open_file(P(REPORT))
+        a.ev("() => __mdv.cmds.run('view.preview')")
+        theme0 = a.ev('() => __mdv.settings.theme')
+        a.ev("() => __mdv.cmds.run('view.theme.dark')")
+        a.page.emulate_media(media='print')
+        r = a.ev('''() => { const root = __mdv.preview.root, code = root.querySelector('pre code');
+            return { ws: getComputedStyle(code).whiteSpace, fg: getComputedStyle(__mdv.preview.article).color,
+                     tools: getComputedStyle(root.querySelector('.mdv-code-tools')).display, chrome: getComputedStyle(document.getElementById('menubar')).display }; }''')
+        a.page.emulate_media(media='screen')
+        check('FR-EXP-01', '인쇄 스타일: 다크 테마여도 밝은 글자색, 긴 코드 줄은 접고 코드 도구는 숨긴다',
+              r['ws'] == 'pre-wrap' and r['fg'] == 'rgb(31, 35, 40)' and r['tools'] == 'none' and r['chrome'] == 'none', r)
+        a.ev('() => { window.__themes = []; window.print = () => { window.__themes.push(document.documentElement.dataset.theme); }; }')
+        a.key('Control+p')
+        a.page.wait_for_timeout(800)
+        themes = a.ev('() => window.__themes')
+        after = a.ev('() => document.documentElement.dataset.theme')
+        check('FR-EXP-01', '다크 테마에서 인쇄하면 밝은 테마로 그려 인쇄하고 끝나면 되돌린다', themes == ['light'] and after == 'dark', f'인쇄 때 {themes} 뒤 {after}')
+        a.ev('(t) => __mdv.cmds.run("view.theme." + t)', theme0)
+    guard('FR-EXP-01', '인쇄 스타일', t_report_print)
+
+    def t_report_find_ime():
+        # 찾기 칸: 한글 조합 중의 Enter는 다음 일치로 넘어가지 않는다 (FR-FIND-01)
+        a = cur[0]
+        a.open_file(P(REPORT))
+        a.key('Control+f')
+        inp = a.page.locator('.findbar .find-row input')
+        inp.fill('채우기 문단')
+        a.wait('''() => /[0-9]/.test(document.querySelector('.find-count').textContent)''', 3000)
+        a.page.wait_for_timeout(300)
+        cur_idx = '''() => [...__mdv.preview.root.querySelectorAll('mark.mdv-hit')].findIndex(m => m.classList.contains('mdv-current'))'''
+        inp.press('Enter')
+        i0 = a.ev(cur_idx)
+        a.ev('''() => document.querySelector('.findbar .find-row input').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', isComposing: true, bubbles: true, cancelable: true }))''')
+        i1 = a.ev(cur_idx)
+        inp.press('Enter')
+        i2 = a.ev(cur_idx)
+        a.key('Escape')
+        check('FR-FIND-01', '찾기 칸: 조합 중의 Enter는 넘어가지 않고, 조합이 끝난 Enter는 다음 일치로 간다', i0 >= 0 and i1 == i0 and i2 == i0 + 1, (i0, i1, i2))
+    guard('FR-FIND-01', '찾기 입력기', t_report_find_ime)
 
     ED = DOCS / '편집'
 
@@ -1814,6 +2059,20 @@ def run_desktop(pw):
             v.ev('''() => [...__mdv.preview.root.querySelectorAll('a')].find(a => a.textContent === '셋째로').click()''')
             v.wait('() => __mdv.tabs.active()?.path.endsWith("셋째.md")', 5000)
             check('FR-NAV-03', 'Windows 앱: 문서 안 상대 링크를 새 탭으로 연다', v.h1() == '셋째 문서', v.state()['active'])
+            # 가운데 클릭은 시스템 브라우저로 넘기지 않고 뷰어의 새 탭(뒤)으로 연다 (v2.1)
+            v.ev('''() => { const t = __mdv.tabs.tabs.find(t => t.path.endsWith('셋째.md')); __mdv.tabs.close(t.id); }''')
+            v.open_file(first)
+            n0 = v.ev('() => __mdv.tabs.tabs.length')
+            link = v.page.locator('.preview-host a', has_text='셋째로').first
+            link.scroll_into_view_if_needed()
+            link.click(button='middle')
+            try:
+                v.wait('(n) => __mdv.tabs.tabs.length === n + 1', 5000, arg=n0)
+            except Exception:
+                pass
+            st = v.state()
+            check('FR-NAV-03', 'Windows 앱: 가운데 클릭은 뷰어의 새 탭으로 열고 지금 탭에 머문다',
+                  len(st['tabs']) == n0 + 1 and st['active'] == first, f'탭 {n0}→{len(st["tabs"])} 활성={st["active"]}')
         guard('FR-NAV-03', 'Windows 앱 링크', t_link)
 
         def t_watch():

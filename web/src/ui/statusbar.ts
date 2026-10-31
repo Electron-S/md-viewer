@@ -7,6 +7,10 @@ const MODE_LABEL: Record<ViewMode, string> = S.mode;
 /** 상태 표시줄 (FR-INFO-01). 인코딩을 누르면 다시 읽을 인코딩을 고른다. */
 export class StatusBar {
   onEncodingClick: (anchor: HTMLElement) => void = () => {};
+  /** 바뀐 곳 표시를 눌렀다: 다음 바뀐 곳으로 간다 (FR-WATCH-05). */
+  onChangesClick: () => void = () => {};
+  /** 지금 옮겨 간 바뀐 곳의 번호(0부터). 옮겨 가지 않았으면 null */
+  changeIndex: number | null = null;
   private left: HTMLElement;
   private right: HTMLElement;
   private counts = new WeakMap<DocModel, { lines: number; words: number; chars: number }>();
@@ -52,6 +56,16 @@ export class StatusBar {
       if (doc.decodeWarning) this.item(this.left, S.status.decodeWarning, 'warning').classList.add('warn');
       if (doc.state === 'deleted') this.item(this.left, S.status.deleted, 'deleted').classList.add('warn');
       if (doc.dirty) this.item(this.left, S.status.modified, 'modified').classList.add('modified');
+      const n = doc.changes?.length ?? 0;
+      if (n) {
+        const b = document.createElement('button');
+        b.className = 'status-item status-button changed';
+        b.dataset.field = 'changes';
+        b.textContent = S.status.changes(n, this.changeIndex);
+        b.title = S.status.changesTitle;
+        b.addEventListener('click', () => this.onChangesClick());
+        this.left.append(b);
+      }
     }
     if (this.offline) this.item(this.right, S.status.offline, 'offline').classList.add('warn');
     if (mode) this.item(this.right, MODE_LABEL[mode], 'mode');

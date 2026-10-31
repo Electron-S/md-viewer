@@ -18,6 +18,8 @@
    예외는 Mermaid 다이어그램 상자(.mdv-mermaid) 안의 svg뿐이다. 그 안은 따로 정제해 다이어그램 밖을 꾸미지 못한다(FR-REN-07). */
 .markdown-body > * { content-visibility: auto; contain-intrinsic-size: auto 4em; }
 .markdown-body > .mdv-chunk { contain-intrinsic-size: auto 256em; }
+/* 묶음은 content-visibility 때문에 자기 상자 밖을 그리지 않는다. 바뀐 곳 표시(왼쪽 막대)가 잘리지 않게 상자를 왼쪽 여백으로 넓힌다. 안쪽 배치는 그대로다. */
+.markdown-body > .mdv-chunk { margin-left: -20px; padding-left: 20px; }
 .markdown-body h1, .markdown-body h2, .markdown-body h3, .markdown-body h4, .markdown-body h5, .markdown-body h6 {
   margin: 24px 0 14px;
   font-weight: 600;
@@ -57,6 +59,27 @@
   border-radius: 6px;
 }
 .markdown-body pre code { padding: 0; background: none; font-size: 1em; white-space: pre; }
+
+/* 코드 블록 도구: 언어 이름과 복사 버튼 (FR-REN-09). 글자는 data-label을 보여 찾기·선택 복사에 섞이지 않는다. */
+.markdown-body pre { position: relative; }
+.markdown-body .mdv-code-tools { position: absolute; top: 6px; right: 6px; display: flex; align-items: center; gap: 6px; opacity: 0; transition: opacity 0.15s; }
+.markdown-body pre:hover > .mdv-code-tools, .markdown-body .mdv-code-tools:focus-within { opacity: 1; }
+.markdown-body .mdv-code-lang::before, .markdown-body .mdv-code-copy::before { content: attr(data-label); }
+.markdown-body .mdv-code-lang { font: 12px/1 "Malgun Gothic", sans-serif; color: var(--md-muted); user-select: none; }
+.markdown-body .mdv-code-copy { font: 12px/1 "Malgun Gothic", sans-serif; padding: 4px 8px; color: var(--md-fg); background: var(--md-code-bg); border: 1px solid var(--md-border); border-radius: 4px; cursor: pointer; }
+.markdown-body .mdv-code-copy:hover { border-color: var(--md-muted); }
+
+/* 밖에서 바뀐 곳 (FR-WATCH-05): 바뀐 블록 왼쪽에 막대, 줄만 지운 자리는 그 뒤 블록 위에 작은 삼각형.
+   pre·표·다이어그램은 자기 상자 밖을 잘라 그리므로 상자 안쪽 가장자리에 그린다. 목록 항목은 목록 들여쓰기만큼 더 왼쪽에 둔다. */
+.markdown-body .mdv-changed, .markdown-body .mdv-deleted-before { position: relative; }
+.markdown-body .mdv-changed::before { content: ''; position: absolute; left: -14px; top: 0; bottom: 0; width: 4px; border-radius: 2px; background: var(--changed); }
+.markdown-body .mdv-deleted-before::before { content: ''; position: absolute; left: -16px; top: -6px; border: 5px solid transparent; border-left: 7px solid var(--changed-del); }
+.markdown-body li.mdv-changed::before { left: calc(-2em - 14px); }
+.markdown-body li.mdv-deleted-before::before { left: calc(-2em - 16px); }
+.markdown-body pre.mdv-changed::before, .markdown-body table.mdv-changed::before, .markdown-body .mdv-mermaid.mdv-changed::before,
+.markdown-body pre.mdv-deleted-before::before, .markdown-body table.mdv-deleted-before::before, .markdown-body .mdv-mermaid.mdv-deleted-before::before { display: none; }
+.markdown-body pre.mdv-changed, .markdown-body table.mdv-changed, .markdown-body .mdv-mermaid.mdv-changed { box-shadow: inset 4px 0 0 var(--changed); }
+.markdown-body pre.mdv-deleted-before, .markdown-body table.mdv-deleted-before, .markdown-body .mdv-mermaid.mdv-deleted-before { box-shadow: inset 0 3px 0 var(--changed-del); }
 .markdown-body pre.mdv-plain { white-space: pre-wrap; font-family: Consolas, "D2Coding", "Malgun Gothic", monospace; }
 
 .markdown-body table { border-collapse: collapse; display: block; width: max-content; max-width: 100%; overflow: auto; }
@@ -106,5 +129,15 @@ mark.mdv-hit.mdv-current { background: var(--find-current); }
 @media print {
   .markdown-body { max-width: none; padding: 0; }
   .markdown-body > * { content-visibility: visible; }
-  .markdown-body pre { white-space: pre-wrap; }
+  .markdown-body > .mdv-chunk { margin-left: 0; padding-left: 0; }
+  /* 긴 코드 줄은 접고, 넓은 표는 잘리지 않게 한다. 블록 한가운데서 쪽이 나뉘지 않게 한다 (FR-EXP-01). */
+  .markdown-body pre, .markdown-body pre code { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .markdown-body pre { overflow: visible; }
+  .markdown-body table { display: table; width: 100%; max-width: 100%; overflow: visible; }
+  .markdown-body td, .markdown-body th { overflow-wrap: anywhere; }
+  .markdown-body pre, .markdown-body table, .markdown-body .mdv-mermaid, .markdown-body img, .markdown-body blockquote { break-inside: avoid; }
+  .markdown-body h1, .markdown-body h2, .markdown-body h3, .markdown-body h4 { break-after: avoid; }
+  .markdown-body .mdv-code-tools, .markdown-body .mdv-changed::before, .markdown-body .mdv-deleted-before::before { display: none; }
+  .markdown-body .mdv-changed, .markdown-body .mdv-deleted-before { box-shadow: none; }
+  mark.mdv-hit { background: none; }
 }

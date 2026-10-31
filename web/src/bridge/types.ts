@@ -13,6 +13,9 @@ export class HostError extends Error {
 export interface PathEntry {
   path: string;
   isDir: boolean;
+  /** 열 때 옮겨 갈 원문 줄(0부터)이나 조각(#제목). 실행기의 `문서.md:줄`·`문서.md#제목` 인자 (FR-LAUNCH-06) */
+  line?: number;
+  fragment?: string;
 }
 
 export interface DirEntry {

@@ -1,5 +1,7 @@
-import { Annotation, Compartment, EditorState, Prec, Transaction } from '@codemirror/state';
-import { drawSelection, EditorView, highlightActiveLine, highlightActiveLineGutter, highlightSpecialChars, keymap, lineNumbers } from '@codemirror/view';
+import { Annotation, Compartment, EditorSelection, EditorState, Prec, StateEffect, StateField, Transaction, type Text } from '@codemirror/state';
+import {
+  Decoration, drawSelection, EditorView, highlightActiveLine, highlightActiveLineGutter, highlightSpecialChars, keymap, lineNumbers, type DecorationSet,
+} from '@codemirror/view';
 import { defaultKeymap, history, historyKeymap, indentWithTab, redo, undo } from '@codemirror/commands';
 import { defaultHighlightStyle, LanguageSupport, syntaxHighlighting } from '@codemirror/language';
 import { markdownKeymap, markdownLanguage } from '@codemirror/lang-markdown';
@@ -7,6 +9,7 @@ import {
   closeSearchPanel, findNext, findPrevious, openSearchPanel, replaceAll, replaceNext, search, SearchQuery, setSearchQuery,
 } from '@codemirror/search';
 import { oneDark } from '@codemirror/theme-one-dark';
+import type { LineRange } from '../changes';
 import { S } from '../strings';
 import { MAX_MATCHES, type FindQuery, type FindStatus } from './find';
 
@@ -17,6 +20,9 @@ const baseTheme = EditorView.theme({
   '.cm-gutters': { borderRight: '1px solid var(--line)' },
   '.cm-searchMatch': { backgroundColor: 'var(--find-hit)', outline: 'none' },
   '.cm-searchMatch-selected': { backgroundColor: 'var(--find-current)' },
+  // 밖에서 바뀐 줄과 줄을 지운 자리 (FR-WATCH-05)
+  '.cm-line.cm-mdv-changed': { boxShadow: 'inset 3px 0 0 var(--changed)' },
+  '.cm-line.cm-mdv-deleted': { boxShadow: 'inset 0 2px 0 var(--changed-del)' },
 });
 
 /** scrollToLine 뒤 같은 줄로 다시 맞추는 시간 */
@@ -26,6 +32,36 @@ const lightTheme = [syntaxHighlighting(defaultHighlightStyle, { fallback: true }
 
 /** 디스크에서 다시 읽은 내용을 편집기에 넣는 변경. 사용자의 편집이 아니므로 수정됨을 켜지 않는다 (FR-EDIT-09). */
 const external = Annotation.define<boolean>();
+
+/** 바뀐 곳 표시를 바꾼다 (FR-WATCH-05). null이면 지운다. */
+const setChanged = StateEffect.define<readonly LineRange[] | null>();
+
+const changedLine = Decoration.line({ class: 'cm-mdv-changed' });
+const deletedLine = Decoration.line({ class: 'cm-mdv-deleted' });
+
+function changedDecorations(doc: Text, ranges: readonly LineRange[] | null): DecorationSet {
+  if (!ranges?.length) return Decoration.none;
+  const marks = [];
+  for (const r of ranges) {
+    if (r.end > r.start) {
+      for (let n = r.start; n < Math.min(r.end, doc.lines); n++) marks.push(changedLine.range(doc.line(n + 1).from));
+    } else {
+      marks.push(deletedLine.range(doc.line(Math.min(r.start, doc.lines - 1) + 1).from));
+    }
+  }
+  return Decoration.set(marks, true);
+}
+
+/** 문서 상태마다 바뀐 곳 표시를 둔다. 사용자가 고치면 지우고, 디스크에서 다시 넣은 변경에는 따라 옮긴 뒤 새 표시로 바꾼다. */
+const changedField = StateField.define<DecorationSet>({
+  create: () => Decoration.none,
+  update(deco, tr) {
+    for (const e of tr.effects) if (e.is(setChanged)) return changedDecorations(tr.state.doc, e.value);
+    if (tr.docChanged) return tr.annotation(external) ? deco.map(tr.changes) : Decoration.none;
+    return deco;
+  },
+  provide: (f) => EditorView.decorations.from(f),
+});
 
 /**
  * 원문 보기 (ARCH-02). 실제 편집기 컴포넌트(CodeMirror)이고 v2.0부터 편집한다 (FR-EDIT-01).
@@ -94,6 +130,7 @@ export class SourceView {
         this.wrap.of(this.wrapOn ? EditorView.lineWrapping : []),
         this.theme.of(this.dark ? oneDark : lightTheme),
         baseTheme,
+        changedField,
         EditorView.updateListener.of((u) => {
           // 맞추는 시간 안에 줄 높이가 바뀌면(늦게 잰 줄 바꿈 등) 다시 맞춘다.
           if (this.target && (u.heightChanged || u.geometryChanged) && performance.now() < this.target.until) this.runSettle();
@@ -230,6 +267,29 @@ export class SourceView {
   setDark(dark: boolean) {
     this.dark = dark;
     this.view.dispatch({ effects: this.theme.reconfigure(dark ? oneDark : lightTheme) });
+  }
+
+  /** 밖에서 바뀐 줄을 표시한다 (FR-WATCH-05). 보이는 문서에만 쓴다. */
+  setChanges(ranges: readonly LineRange[] | null) {
+    this.view.dispatch({ effects: setChanged.of(ranges) });
+  }
+
+  /** 커서를 줄(0부터) 처음으로 옮긴다 (FR-NAV-05). */
+  setCursorLine(line: number) {
+    const doc = this.view.state.doc;
+    const at = doc.line(Math.min(doc.lines, Math.max(1, Math.floor(line) + 1))).from;
+    this.view.dispatch({ selection: EditorSelection.cursor(at) });
+  }
+
+  /** 선택한 원문 줄 범위 [시작, 끝](0부터, 끝 포함)과 선택한 글. 고른 것이 없으면 커서 줄과 빈 글 (FR-INFO-04). */
+  selectionLines(): { start: number; end: number; text: string } {
+    const st = this.view.state;
+    const sel = st.selection.main;
+    const start = st.doc.lineAt(sel.from).number - 1;
+    let end = st.doc.lineAt(sel.to).number - 1;
+    // 줄 끝까지 고르면 커서가 다음 줄 처음에 있다. 그 줄은 넣지 않는다.
+    if (sel.to > sel.from && end > start && st.doc.lineAt(sel.to).from === sel.to) end--;
+    return { start, end, text: st.sliceDoc(sel.from, sel.to) };
   }
 
   /** 화면 맨 위에 보이는 줄(0부터, 소수점은 줄 안 비율) */
