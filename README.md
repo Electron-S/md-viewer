@@ -7,7 +7,7 @@
 - Windows 앱: Windows 10/11 x64. WebView2 런타임과 .NET Framework 4.8이 필요하며 둘 다 Windows에 기본으로 들어 있습니다.
 - 실행기·스킬: Node.js 18 이상(Windows 10/11, WSL2, macOS, Linux)
 - 크기: `viewer.html` 약 2.8 MB, `MDViewer.exe` 약 3.8 MB, 배포 zip 약 5.7 MB (Mermaid가 약 2 MB를 차지한다)
-- 요구사항: [SRS](https://claude.ai/code/artifact/de92e02f-5cc5-40f2-a3ca-80b6b2894cf1) · 설계: [SDD](https://claude.ai/code/artifact/80e2d190-46f7-4ac1-8d38-7a1954577b38) (비공개 문서. 요구사항 ID는 코드 주석과 테스트 이름에 그대로 쓴다)
+- 요구사항: [SRS](docs/SRS.md) · 설계: [SDD](docs/SDD.md) (요구사항 ID는 코드 주석과 테스트 이름에 그대로 쓴다)
 
 ## 쓰는 방법
 
@@ -110,6 +110,7 @@ Markdown·텍스트 확장자(.md, .markdown, .txt 등) 파일에만 씁니다. 
 | `skill/` | Claude Code 스킬(SKILL.md) |
 | `tests/` | E2E(Windows Python + Playwright + Edge·WebView2), Windows 앱 단위 테스트(`tests/host`), 샘플 |
 | `tools/` | 빌드·테스트 스크립트 |
+| `docs/` | 요구사항 명세(SRS.md)와 설계 명세(SDD.md). 그림은 Mermaid |
 
 UI 문자열은 `web/src/strings.ts`, `launcher/strings.ts`, `host/Strings.cs` 세 표에만 둡니다(NFR-USE-02). 그 밖의 코드에 한글 문자열을 쓰면 단위 테스트가 실패합니다.
 
