@@ -40,5 +40,6 @@
 ## 참고
 
 - SRS·SDD는 저장소의 `docs/`에 Markdown으로 두고, 그 변경은 코드와 같은 커밋에 넣는다. 그림은 Mermaid 코드 블록으로 그리고 이 뷰어로 그려지는지 본다. 2026-10-31에 Claude Docs에서 옮겼고(SRS v0.7까지), Claude Docs의 원본은 더 고치지 않는다.
+- 풀지 못한 문제, 하지 못한 수동 점검, 다음 개선안 후보는 `docs/TODO.md`에 남기고, 끝내면 지운다.
 - E2E는 WSL에서 Windows Python + Playwright로 Edge와 MDViewer.exe를 조종한다. 두 E2E나 빌드를 동시에 돌리지 않는다(측정값이 흔들린다).
 - Python 코드는 Windows의 CP949 문제를 피하려고 파일을 바이트나 `encoding='utf-8'`로만 읽고 쓴다.

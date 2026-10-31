@@ -124,7 +124,7 @@ Markdown·텍스트 확장자(.md, .markdown, .txt 등) 파일에만 씁니다. 
 | `skill/` | Claude Code 스킬(SKILL.md) |
 | `tests/` | E2E(Windows Python + Playwright + Edge·WebView2), Windows 앱 단위 테스트(`tests/host`), 샘플 |
 | `tools/` | 빌드·테스트 스크립트 |
-| `docs/` | 요구사항 명세(SRS.md)와 설계 명세(SDD.md). 그림은 Mermaid |
+| `docs/` | 요구사항 명세(SRS.md), 설계 명세(SDD.md), 할 일(TODO.md: 미해결·수동 점검·다음 개선안). 그림은 Mermaid |
 
 UI 문자열은 `web/src/strings.ts`, `launcher/strings.ts`, `host/Strings.cs` 세 표에만 둡니다(NFR-USE-02). 그 밖의 코드에 한글 문자열을 쓰면 단위 테스트가 실패합니다.
 
