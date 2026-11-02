@@ -11,7 +11,7 @@ DISTRO=${WSL_DISTRO_NAME:?WSL 안에서 실행하세요}
 NODE=$(command -v node)
 # 빌드 결과가 없거나 소스보다 오래됐으면 다시 빌드한다. 고친 코드 대신 지난 빌드를 시험하지 않게 한다.
 if [ ! -f dist/viewer.html ] || [ ! -f dist/mdview/mdview.mjs ] || [ ! -f dist/MDViewer.exe ] ||
-  [ -n "$(find web launcher skill host tools/build.mjs tools/exe.mjs package.json -newer dist/viewer.html -print -quit)" ]; then
+  [ -n "$(find web launcher skill host tools/build.mjs tools/exe.mjs package.json RELEASE_NOTES.md -newer dist/viewer.html -print -quit)" ]; then
   node tools/build.mjs
 fi
 WIN_LOCAL=$(wslpath -u "$(cd /mnt/c && cmd.exe /c 'echo %LOCALAPPDATA%' 2>/dev/null | tr -d '\r')")

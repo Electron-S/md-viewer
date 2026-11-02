@@ -68,6 +68,7 @@ const ko = {
     findPrev: '이전 찾기',
     reopenWithEncoding: (label: string) => `${label}로 다시 읽기`,
     helpShortcuts: '단축키 목록',
+    helpHistory: '버전별 변경 이력',
     helpAbout: 'MD Viewer 정보',
   },
 
@@ -92,6 +93,8 @@ const ko = {
   dialog: {
     ok: '확인',
     cancel: '취소',
+    currentVersion: (v: string) => `현재 버전 ${v}`,
+    currentVersionTag: ' · 현재 버전',
     version: (v: string) => `버전 ${v}`,
     modeStandalone: '독립 모드: 브라우저에서 직접 연 뷰어',
     modeLauncher: '실행기 모드: mdview 실행기가 띄운 뷰어',

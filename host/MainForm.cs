@@ -54,7 +54,7 @@ namespace MdViewer
             bootTask = Task.Run(() => BuildBootJson(bootArgs));
             viewerTask = Task.Run(() => Embedded.Read("viewer.html"));
             envTask = CoreWebView2Environment.CreateAsync(null, Storage.WebViewDir, new CoreWebView2EnvironmentOptions());
-            Text = Strings.AppName;
+            Text = Strings.AppName + " v" + BuildInfo.Version;
             try
             {
                 Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
@@ -123,7 +123,7 @@ namespace MdViewer
                 };
                 core.DocumentTitleChanged += (s, e) =>
                 {
-                    Text = core.DocumentTitle;
+                    Text = core.DocumentTitle + " v" + BuildInfo.Version;
                     Trace.Mark("title " + core.DocumentTitle);
                 };
                 core.NavigationCompleted += (s, e) => Trace.Mark("navigated");

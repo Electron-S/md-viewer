@@ -24,7 +24,7 @@ await esbuild.build({
   outbase: '.',
   outExtension: { '.js': '.mjs' },
   external: ['jsdom', 'esbuild'],
-  loader: { '.css': 'text' },
+  loader: { '.css': 'text', '.md': 'text' },
   logLevel: 'warning',
   define: { __MDV_VERSION__: JSON.stringify(VERSION) },
   banner: { js: "import { createRequire } from 'module'; const require = createRequire(import.meta.url);" },

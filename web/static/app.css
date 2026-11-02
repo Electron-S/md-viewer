@@ -261,3 +261,14 @@ button:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--accent
     color-scheme: light;
   }
 }
+
+/* 버전 표시와 오프라인 릴리스 이력 */
+.app-version { margin-left: auto; padding: 5px 10px; align-self: center; color: var(--fg); font-size: 12px; white-space: nowrap; }
+.release-history { width: 580px; max-width: 100%; line-height: 1.6; }
+.release-history details { border-top: 1px solid var(--line); padding: 10px 0; }
+.release-history summary { cursor: pointer; font-weight: 600; }
+.release-history h3 { font-size: 14px; margin: 16px 0 6px; }
+.release-history table { border-collapse: collapse; font-size: 12px; }
+.release-history th, .release-history td { border: 1px solid var(--line); padding: 4px 6px; }
+.release-history pre { overflow: auto; }
+.release-history code { overflow-wrap: anywhere; }

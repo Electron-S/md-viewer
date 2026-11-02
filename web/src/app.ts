@@ -1,3 +1,4 @@
+import { releaseHistory } from './ui/release-history';
 import { createBridge, HostError, type HostDoc, type PathEntry, type ReadyInfo } from './bridge';
 import { markChangedBlocks, stepChange } from './changes';
 import { CommandRegistry } from './commands';
@@ -171,6 +172,11 @@ export class App {
     }
     this.restorable = ready.restorable;
     this.info = ready;
+    const version = document.createElement('span');
+    version.className = 'app-version';
+    version.textContent = `v${ready.version}`;
+    version.setAttribute('aria-label', S.dialog.version(ready.version));
+    $('menubar').append(version);
     this.settings = parseSettings(ready.settings);
     this.session = parseSession(ready.session);
     this.applyTheme();
@@ -1561,6 +1567,9 @@ export class App {
     }
 
     c.register({ id: 'help.shortcuts', title: S.cmd.helpShortcuts, keys: ['F1'], run: () => this.showShortcuts() });
+    c.register({ id: 'help.history', title: S.cmd.helpHistory, run: () => {
+      void showDialog(S.cmd.helpHistory, releaseHistory(this.info?.version ?? __MDV_VERSION__));
+    } });
     c.register({ id: 'help.about', title: S.cmd.helpAbout, run: () => this.showAbout() });
   }
 
@@ -1630,7 +1639,7 @@ export class App {
           ...(this.bridge.mode === 'desktop' ? [{ cmd: 'app.openWith' }] : []),
         ],
       },
-      { label: S.menu.help, key: 'H', items: () => [{ cmd: 'help.shortcuts' }, { cmd: 'help.about' }] },
+      { label: S.menu.help, key: 'H', items: () => [{ cmd: 'help.shortcuts' }, { cmd: 'help.history' }, { cmd: 'help.about' }] },
     ];
   }
 
